@@ -9,7 +9,6 @@
 帮我出本周周汇总
 现在线上有多少个Bug？
 这个版本还有几天发布，有没有延期风险？
-下一版本哪些需求还没下单？
 ```
 
 ---
@@ -56,8 +55,6 @@ bsg-zentao/
     └── report_tools.py    报告数据组装（日报 + 周汇总）
 ```
 
-**以上所有文件进 git，团队共享。**
-
 以下内容在用户本机自动生成，**不进 git**：
 
 ```
@@ -65,33 +62,49 @@ bsg-zentao/
 ├── config.json    账号密码（仅本机可读）
 ├── 缓存/          接口数据缓存（当天有效）
 └── 报告/
-    ├── 日报/          YYYYMMDD_日报.md
-    ├── 周汇总/        YYYYWW_周汇总.md
-    ├── 周报/          YYYYWW_周报.md
+    ├── 日报/
+    ├── 周汇总/
+    ├── 周报/
     ├── Bug界定/
     └── 版本复盘/
 ```
 
 ---
 
-## 安装步骤
+## 安装步骤（Mac）
 
-### 第一步：克隆仓库
+### 第一步：安装 Python 3.11+
+
+打开「终端」，检查当前版本：
+
+```bash
+python3 --version
+```
+
+如果版本低于 3.11，用 Homebrew 安装新版本：
+
+```bash
+# 没有 Homebrew 的先安装
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+# 安装 Python 3.12
+brew install python@3.12
+```
+
+### 第二步：克隆仓库
 
 ```bash
 git clone https://github.com/sssguoqiang-art/bsg-zentao.git
 cd bsg-zentao
 ```
 
-### 第二步：安装 Python 依赖
+### 第三步：安装 Python 依赖
 
 ```bash
-pip install -r requirements.txt
+pip3 install -r requirements.txt
 ```
 
-### 第三步：安装 Skill 到 Claude Code
-
-`bsg-zentao-api.skill` 是禅道接口调用规范，安装后 Claude Code 在处理任何禅道相关任务时会自动参考，确保接口字段准确无误。
+### 第四步：安装 Skill 到 Claude Code
 
 在 Claude Code 中输入：
 
@@ -99,27 +112,90 @@ pip install -r requirements.txt
 请安装仓库里的 bsg-zentao-api.skill 文件
 ```
 
-### 第四步：配置禅道账号
+### 第五步：配置禅道账号
 
 ```bash
+python3 setup_config.py
+```
+
+按提示输入你自己的禅道账号和密码，脚本自动验证并保存到本机。
+
+### 第六步：注册 MCP Server 到 Claude Code
+
+```bash
+claude mcp add bsg-zentao python3 ~/bsg-zentao/mcp_server.py
+```
+
+> 路径根据你实际克隆的位置调整，例如克隆到桌面：
+> `claude mcp add bsg-zentao python3 ~/Desktop/bsg-zentao/mcp_server.py`
+
+重启 Claude Code 后即可使用。
+
+---
+
+## 安装步骤（Windows）
+
+### 第一步：安装 Python 3.11+
+
+1. 打开浏览器，访问 [python.org/downloads](https://www.python.org/downloads/)
+2. 下载最新的 Python 3.12 Windows 安装包
+3. 运行安装包，**勾选「Add Python to PATH」**（重要，否则后续命令无法识别）
+4. 点击「Install Now」完成安装
+
+安装完成后，打开「命令提示符」（Win+R，输入 `cmd`）验证：
+
+```cmd
+python --version
+```
+
+### 第二步：克隆仓库
+
+```cmd
+git clone https://github.com/sssguoqiang-art/bsg-zentao.git
+cd bsg-zentao
+```
+
+> 没有 git 的话，先到 [git-scm.com](https://git-scm.com/download/win) 下载安装。
+> 或者直接在 GitHub 页面点「Code → Download ZIP」解压也可以。
+
+### 第三步：安装 Python 依赖
+
+```cmd
+pip install -r requirements.txt
+```
+
+### 第四步：安装 Skill 到 Claude Code
+
+在 Claude Code 中输入：
+
+```
+请安装仓库里的 bsg-zentao-api.skill 文件
+```
+
+### 第五步：配置禅道账号
+
+```cmd
 python setup_config.py
 ```
 
-按提示输入禅道账号密码，脚本自动验证登录并保存到本机 `~/.bsg-zentao/config.json`。
+按提示输入你自己的禅道账号和密码。
 
-### 第五步：注册 MCP Server 到 Claude Code
+### 第六步：注册 MCP Server 到 Claude Code
 
-```bash
-claude mcp add bsg-zentao python ~/bsg-zentao/mcp_server.py
+在命令提示符中，先确认仓库的完整路径（用 `cd` 进入仓库目录后输入 `cd` 回车即可看到），然后运行：
+
+```cmd
+claude mcp add bsg-zentao python C:\Users\你的用户名\bsg-zentao\mcp_server.py
 ```
 
-> 路径根据你实际克隆的位置调整。
+> 把路径替换成你实际的仓库位置，例如：
+> `claude mcp add bsg-zentao python C:\Users\zhangsan\Desktop\bsg-zentao\mcp_server.py`
+
+重启 Claude Code 后即可使用。
 
 ---
 
 ## 使用方式
-
-注册完成后，在 Claude Code 中直接用中文提问。
 
 ### 日报
 
@@ -137,13 +213,11 @@ claude mcp add bsg-zentao python ~/bsg-zentao/mcp_server.py
 ```
 
 一次性生成两份报告：
-- **效能周汇总**（管理会议版）：含平台/游戏双项目版本状态、延期、调整、重点需求等完整数据
-- **效能周报**（老板版）：结论驱动，5分钟阅读
+- **效能周汇总**（管理会议版）：含平台/游戏双项目完整数据
+- **效能周报**（老板版）：结论驱动，聚焦风险和决策
 
-> ⚠️ 专题进展（AI伴侣台数/Web5替换/性能优化/招聘）和效能工作内容不来自禅道，
-> Claude 会输出占位符 `[待补充]`，需要你手动填写后再发送。
-
-生成的报告自动保存到 `~/.bsg-zentao/报告/周汇总/` 和 `~/.bsg-zentao/报告/周报/`。
+> ⚠️ 专题进展（AI伴侣/Web5/性能/招聘）和效能工作内容不来自禅道，
+> Claude 会输出 `[待补充]` 占位符，需手动填写后再发送。
 
 ### 自由查询
 
@@ -151,7 +225,6 @@ claude mcp add bsg-zentao python ~/bsg-zentao/mcp_server.py
 平台项目当前版本还有几天发布？
 线上现在有多少个活跃Bug？
 这个版本有哪些需求还没下单？
-有没有延期超过3天的任务？
 这个版本交付有风险吗？
 ```
 
@@ -170,49 +243,56 @@ claude mcp add bsg-zentao python ~/bsg-zentao/mcp_server.py
 
 ---
 
-## 关于占位符
-
-周汇总中以下内容**不来自禅道**，Claude 会自动输出 `[待补充]` 占位符：
-
-| 板块 | 原因 | 补充方式 |
-|---|---|---|
-| AI伴侣替换台数 | 来自运维记录，非禅道数据 | 人工填写 |
-| Web5替换台数 | 同上 | 人工填写 |
-| 性能优化节点 | 部分节点在禅道外跟进 | 人工填写 |
-| 招聘进展 | 来自 HR 系统 | 人工填写 |
-| 游戏数据摘要 | 来自游戏排名系统 | 人工填写 |
-| 效能工作推进 | 效能部门内部工作 | 人工填写 |
-
----
-
 ## 数据缓存
 
-工具缓存当天的接口数据，同一天重复提问不会重复请求禅道接口，响应更快。
+工具缓存当天的接口数据，同一天重复提问不会重复请求禅道，响应更快。
 
 手动清除缓存（数据异常时使用）：
 
+**Mac：**
 ```bash
 rm -rf ~/.bsg-zentao/缓存/
+```
+
+**Windows：**
+```cmd
+rmdir /s /q %USERPROFILE%\.bsg-zentao\缓存
 ```
 
 ---
 
 ## 常见问题
 
-**Q：提示"配置文件不存在"**
-先运行 `python setup_config.py` 完成初始化。
+**Q：提示「配置文件不存在」**
+先运行 `python setup_config.py`（Windows）或 `python3 setup_config.py`（Mac）完成初始化。
 
-**Q：提示"登录失败"**
+**Q：提示「登录失败」**
 检查账号密码是否正确，确认网络能访问禅道内网。
 
 **Q：报告数据不对**
-删除缓存后重新运行：`rm -rf ~/.bsg-zentao/缓存/`
+清除缓存后重新运行（命令见上方「数据缓存」章节）。
 
-**Q：想重新配置账号**
-重新运行 `python setup_config.py`，选 `y` 覆盖现有配置。
+**Q：Windows 提示「python 不是内部命令」**
+安装 Python 时没有勾选「Add Python to PATH」，重新安装并勾选该选项。
 
 **Q：周汇总的专题内容是空的**
-正常现象，Claude 会输出 `[待补充]` 占位符，需要你手动填入 AI伴侣台数、Web5台数等内容后再发送。
+正常现象，Claude 会输出 `[待补充]` 占位符，手动填入后再发送。
+
+**Q：工具有更新怎么同步**
+
+Mac：
+```bash
+cd bsg-zentao
+git pull
+pip3 install -r requirements.txt
+```
+
+Windows：
+```cmd
+cd bsg-zentao
+git pull
+pip install -r requirements.txt
+```
 
 ---
 
@@ -220,5 +300,5 @@ rm -rf ~/.bsg-zentao/缓存/
 
 | 版本 | 日期 | 说明 |
 |---|---|---|
-| v1.1 | 2026-04-10 | 新增周汇总场景（管理会议版+老板版） |
+| v1.1 | 2026-04-10 | 新增周汇总场景，补充 Windows 安装说明 |
 | v1.0 | 2026-04-09 | 日报场景上线，含自由问答数据工具 |
