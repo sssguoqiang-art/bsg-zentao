@@ -2,7 +2,7 @@
 
 基于 Claude Code 的禅道数据查询和报告生成工具。
 
-用自然语言与 Claude Code 对话，直接获取禅道数据和报告：
+克隆此仓库后，在 Claude Code 中用自然语言直接操作禅道数据：
 
 ```
 帮我出今天的平台项目日报
@@ -13,47 +13,56 @@
 
 ---
 
+## 前提条件
+
+- **Claude Code 已安装并登录**（必须）
+- Python 3.11 或以上
+- 网络能访问禅道内网（`https://cd.baa360.cc:20088`）
+
+---
+
 ## 这个仓库包含什么
 
 ```
 bsg-zentao/
 │
-│  ── 给 Claude 读的文件 ──
+│  ── 给 Claude Code 读的文件 ──────────────────────────────
 ├── CLAUDE.md              业务规则（Claude 靠这个理解禅道业务，生成准确报告）
-├── bsg-zentao-api.skill   禅道接口规范（Claude Code 在接口相关任务时自动调用）
+├── bsg-zentao-api.skill   禅道接口规范 Skill（需安装到 Claude Code）
 │
-│  ── 给用户看的文件 ──
-├── README.md              本文件，安装和使用说明
+│  ── 给用户看的文件 ────────────────────────────────────────
+├── README.md              本文件
 ├── requirements.txt       Python 依赖
 ├── .gitignore             排除敏感数据
 │
-│  ── 初始化脚本 ──
+│  ── 初始化 ────────────────────────────────────────────────
 ├── setup_config.py        首次运行，配置禅道账号密码
 │
-│  ── MCP Server ──
+│  ── MCP Server ────────────────────────────────────────────
 ├── mcp_server.py          Claude Code 调用工具的入口
 │
-│  ── 核心模块 ──
+│  ── 核心模块 ──────────────────────────────────────────────
 ├── bsg_zentao/
 │   ├── client.py          禅道接口客户端（登录、请求、缓存）
-│   ├── constants.py       业务常量（项目ID、部门映射、状态定义）
+│   ├── constants.py       业务常量（项目ID、部门映射）
 │   └── utils.py           工具函数（日期、文字处理）
 │
-│  ── 工具层 ──
+│  ── 工具层 ────────────────────────────────────────────────
 └── tools/
-    ├── data_tools.py      原子数据工具（取版本、取需求、取Bug）
-    ├── calc_daily.py      日报计算逻辑（7个板块的业务计算）
-    └── report_tools.py    报告数据组装（交给 Claude 生成正文）
+    ├── data_tools.py      原子数据工具（取版本、需求、Bug）
+    ├── calc_daily.py      日报计算逻辑
+    └── report_tools.py    报告数据组装
 ```
 
-**以上所有文件都进 git，团队共享。**
+**以上所有文件进 git，团队共享。**
 
 以下内容在用户本机自动生成，**不进 git**：
+
 ```
 ~/.bsg-zentao/
 ├── config.json    账号密码（仅本机可读）
 ├── 缓存/          接口数据缓存（当天有效）
-└── 报告/          生成的报告文件
+└── 报告/
     ├── 日报/
     ├── 周汇总/
     ├── Bug界定/
@@ -62,77 +71,59 @@ bsg-zentao/
 
 ---
 
-## 关于 bsg-zentao-api.skill
-
-`bsg-zentao-api.skill` 是禅道接口调用规范的 Claude Skill 文件。
-
-**它是什么**：记录了禅道所有接口的字段映射、枚举值、调用陷阱和注意事项，
-是通过浏览器逐个接口实测后沉淀的可信文档。
-
-**它做什么**：当 Claude Code 需要处理任何与禅道接口相关的任务时（包括调试脚本、
-新增功能、排查数据异常），会自动调用此 Skill 获取接口规范，确保生成的代码和逻辑与实际接口一致。
-
-**为什么放进 git**：接口会随禅道版本升级而变化。把 Skill 和代码放在一起，
-每次接口变更时同步更新 Skill，保证规范和代码始终对齐。
-
-**安装方式**：
-1. 打开 [claude.ai](https://claude.ai)
-2. 进入「Settings → Skills」
-3. 上传 `bsg-zentao-api.skill` 文件
-
-安装后，所有对话中涉及禅道接口的问题，Claude 都会自动参考此规范。
-
----
-
-## 环境要求
-
-- Python 3.11 或以上
-- [Claude Code](https://claude.ai/code) 已安装并登录
-- 网络能访问禅道内网（`https://cd.baa360.cc:20088`）
-
----
-
 ## 安装步骤
 
-**第一步：克隆仓库**
+### 第一步：克隆仓库
 
 ```bash
 git clone https://github.com/sssguoqiang-art/bsg-zentao.git
 cd bsg-zentao
 ```
 
-**第二步：安装 Python 依赖**
+### 第二步：安装 Python 依赖
 
 ```bash
 pip install -r requirements.txt
 ```
 
-**第三步：安装 Skill（可选，但推荐）**
+### 第三步：安装 Skill 到 Claude Code
 
-在 claude.ai → Settings → Skills 上传 `bsg-zentao-api.skill`。
+`bsg-zentao-api.skill` 是禅道接口调用规范，安装后 Claude Code 在处理任何禅道相关任务时会自动参考，确保接口字段准确无误。
 
-**第四步：初始化禅道账号配置**
+在 Claude Code 中输入：
+
+```
+请安装仓库里的 bsg-zentao-api.skill 文件
+```
+
+或在终端中直接运行：
+
+```bash
+claude /path/to/bsg-zentao/bsg-zentao-api.skill
+```
+
+### 第四步：配置禅道账号
 
 ```bash
 python setup_config.py
 ```
 
-按提示输入禅道账号密码，脚本自动验证登录并保存到本机。
-完成后会显示下一步命令。
+按提示输入禅道账号密码，脚本自动验证登录并保存到本机 `~/.bsg-zentao/config.json`。
 
-**第五步：注册到 Claude Code**
+### 第五步：注册 MCP Server 到 Claude Code
 
 ```bash
 claude mcp add bsg-zentao python ~/bsg-zentao/mcp_server.py
 ```
 
-完成后重启 Claude Code，即可开始使用。
+> 路径根据你实际克隆的位置调整，例如克隆到桌面则为：
+> `claude mcp add bsg-zentao python ~/Desktop/bsg-zentao/mcp_server.py`
 
 ---
 
 ## 使用方式
 
-直接在 Claude Code 中用中文提问：
+注册完成后，在 Claude Code 中直接用中文提问：
 
 **生成报告：**
 ```
@@ -152,17 +143,28 @@ claude mcp add bsg-zentao python ~/bsg-zentao/mcp_server.py
 这个版本交付有风险吗？
 ```
 
-Claude 会自动判断需要哪些数据，调用对应工具，用中文回答。
+Claude Code 会自动判断需要哪些数据，调用对应工具，用中文回答或生成报告。
+
+生成的报告自动保存到 `~/.bsg-zentao/报告/日报/YYYYMMDD_日报.md`。
 
 ---
 
-## 数据缓存说明
+## 关于 bsg-zentao-api.skill
 
-工具会缓存当天的接口数据，同一天内重复提问不会重复请求禅道接口，响应更快。
+这是禅道接口调用规范的 Skill 文件，记录了所有接口的字段映射、枚举值和调用陷阱，由浏览器逐个接口实测后沉淀而成。
 
-缓存存放在 `~/.bsg-zentao/缓存/`，按日期自动隔离，次日自动重新拉取。
+**为什么要安装**：禅道接口字段多、部分字段行为与文档不符，Skill 是已验证的可信规范。Claude Code 处理禅道相关任务时会自动加载，确保生成代码和逻辑与实际接口一致。
 
-手动清除缓存（数据不对时使用）：
+**为什么跟代码放一起**：接口会随禅道升级变化。Skill 和代码同仓库管理，接口变更时一起更新，始终保持对齐。
+
+---
+
+## 数据缓存
+
+工具缓存当天的接口数据，同一天重复提问不会重复请求禅道接口，响应更快。
+
+手动清除缓存（数据异常时使用）：
+
 ```bash
 rm -rf ~/.bsg-zentao/缓存/
 ```
@@ -175,17 +177,16 @@ rm -rf ~/.bsg-zentao/缓存/
 先运行 `python setup_config.py` 完成初始化。
 
 **Q：提示"登录失败"**
-检查账号密码是否正确，确认当前网络能访问禅道内网。
+检查账号密码是否正确，确认网络能访问禅道内网。
 
-**Q：报告数据为空或不正常**
+**Q：报告数据不对**
 删除缓存后重新运行：`rm -rf ~/.bsg-zentao/缓存/`
 
-**Q：想重新配置账号密码**
-重新运行 `python setup_config.py`，选择 `y` 覆盖现有配置。
+**Q：想重新配置账号**
+重新运行 `python setup_config.py`，选 `y` 覆盖现有配置。
 
 **Q：接口字段变了怎么办**
-禅道升级后如果字段有变化，代码中的字段探针（`schema_probe.py`）会自动告警。
-告知维护者更新 `bsg-zentao-api.skill` 和相关代码即可。
+脚本中的字段探针会自动告警，告知维护者更新 `bsg-zentao-api.skill` 和代码即可，然后重新推到 git，用户重新 pull 即可同步。
 
 ---
 
