@@ -97,7 +97,7 @@ bsg-zentao/
 **第一步：克隆仓库**
 
 ```bash
-git clone <仓库地址>
+git clone https://github.com/sssguoqiang-art/bsg-zentao.git
 cd bsg-zentao
 ```
 
@@ -123,7 +123,7 @@ python setup_config.py
 **第五步：注册到 Claude Code**
 
 ```bash
-claude mcp add bsg-zentao python /你的完整路径/bsg-zentao/mcp_server.py
+claude mcp add bsg-zentao python ~/bsg-zentao/mcp_server.py
 ```
 
 完成后重启 Claude Code，即可开始使用。
