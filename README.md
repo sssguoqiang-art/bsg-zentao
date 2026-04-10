@@ -2,22 +2,138 @@
 
 基于 Claude Code 的禅道数据查询和报告生成工具。
 
-克隆此仓库后，在 Claude Code 中用自然语言直接操作禅道数据：
+安装完成后，直接用中文跟 Claude Code 对话：
 
 ```
 帮我出今天的平台项目日报
 现在线上有多少个Bug？
 这个版本还有几天发布，有没有延期风险？
-下一版本哪些需求还没下单？
 ```
 
 ---
 
-## 前提条件
+## 使用前提
 
-- **Claude Code 已安装并登录**（必须）
-- Python 3.11 或以上
-- 网络能访问禅道内网（`https://cd.baa360.cc:20088`）
+以下三项需要提前满足：
+
+- ✅ **Claude Code 已安装并登录**
+- ✅ **Python 3.10 或以上版本**（见下方安装说明）
+- ✅ **电脑网络能访问禅道内网**（`https://cd.baa360.cc:20088`）
+
+---
+
+## 第一次使用（新用户安装）
+
+> 只需要做一次，后续不用重复。
+
+### 步骤一：安装 Python 3.12
+
+macOS 系统自带的 Python 版本太旧（3.9），需要先安装新版本。
+
+打开 Mac 的「终端」应用（在 Spotlight 搜索「终端」即可找到），复制粘贴以下命令运行：
+
+```bash
+# 第一行：安装 Homebrew（Mac 上的软件管理工具，如果已有可跳过）
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+# 第二行：用 Homebrew 安装 Python 3.12
+brew install python@3.12
+```
+
+### 步骤二：下载工具代码
+
+在终端运行：
+
+```bash
+git clone https://github.com/sssguoqiang-art/bsg-zentao.git
+cd bsg-zentao
+```
+
+这会把代码下载到当前目录下的 `bsg-zentao` 文件夹。
+
+### 步骤三：安装依赖
+
+```bash
+python3.12 -m pip install -r requirements.txt
+```
+
+### 步骤四：安装 Skill 到 Claude Code
+
+Skill 是工具的「接口规范文件」，安装后 Claude Code 才能正确理解禅道的数据。
+
+在终端运行：
+
+```bash
+# 进入代码目录（如果还没进入的话）
+cd bsg-zentao
+
+# 安装 Skill
+claude skill install bsg-zentao-api.skill
+```
+
+### 步骤五：配置禅道账号
+
+```bash
+python3.12 setup_config.py
+```
+
+按提示输入你的禅道账号和密码。
+- 密码输入时不会显示字符，直接输入后回车即可
+- 脚本会自动验证账号是否正确
+- 账号密码只保存在你自己电脑上，不会上传到任何地方
+
+### 步骤六：注册工具到 Claude Code
+
+```bash
+claude mcp add bsg-zentao python3.12 $(pwd)/mcp_server.py
+```
+
+> 注意：`$(pwd)` 会自动填入当前目录路径，在 `bsg-zentao` 文件夹内运行才正确。
+
+---
+
+完成以上六步后，**重启 Claude Code**，即可开始使用。
+
+---
+
+## 后续使用（已安装用户）
+
+> 工具安装好之后，日常使用只需打开 Claude Code 直接提问，无需任何操作。
+
+---
+
+## 工具有更新时（同步最新版本）
+
+当维护者更新了工具代码后，你需要同步更新。
+
+在终端进入代码目录，运行以下命令：
+
+```bash
+# 进入代码目录
+cd bsg-zentao
+
+# 拉取最新代码
+git pull
+
+# 如果依赖有变化，重新安装
+python3.12 -m pip install -r requirements.txt
+```
+
+> **什么时候需要更新？**
+> 维护者会通知你，或者你发现工具数据不对时，可以运行上面的命令同步一次。
+
+---
+
+## 禅道账号变更时
+
+如果你需要更换禅道账号或密码，在终端运行：
+
+```bash
+cd bsg-zentao
+python3.12 setup_config.py
+```
+
+按提示选择「重新配置」，输入新的账号密码即可。旧的账号信息会被覆盖。
 
 ---
 
@@ -26,42 +142,34 @@
 ```
 bsg-zentao/
 │
-│  ── 给 Claude Code 读的文件 ──────────────────────────────
-├── CLAUDE.md              业务规则（Claude 靠这个理解禅道业务，生成准确报告）
-├── bsg-zentao-api.skill   禅道接口规范 Skill（需安装到 Claude Code）
+│  ── 给 Claude Code 读的文件 ──
+├── CLAUDE.md              业务规则（Claude 靠这个理解禅道业务）
+├── bsg-zentao-api.skill   禅道接口规范 Skill
 │
-│  ── 给用户看的文件 ────────────────────────────────────────
+│  ── 用户操作文件 ──
 ├── README.md              本文件
-├── requirements.txt       Python 依赖
+├── requirements.txt       Python 依赖列表
 ├── .gitignore             排除敏感数据
-│
-│  ── 初始化 ────────────────────────────────────────────────
-├── setup_config.py        首次运行，配置禅道账号密码
-│
-│  ── MCP Server ────────────────────────────────────────────
+├── setup_config.py        账号配置脚本
 ├── mcp_server.py          Claude Code 调用工具的入口
 │
-│  ── 核心模块 ──────────────────────────────────────────────
+│  ── 核心代码 ──
 ├── bsg_zentao/
-│   ├── client.py          禅道接口客户端（登录、请求、缓存）
-│   ├── constants.py       业务常量（项目ID、部门映射）
-│   └── utils.py           工具函数（日期、文字处理）
-│
-│  ── 工具层 ────────────────────────────────────────────────
+│   ├── client.py          禅道接口客户端
+│   ├── constants.py       业务常量
+│   └── utils.py           工具函数
 └── tools/
-    ├── data_tools.py      原子数据工具（取版本、需求、Bug）
+    ├── data_tools.py      数据获取工具
     ├── calc_daily.py      日报计算逻辑
     └── report_tools.py    报告数据组装
 ```
 
-**以上所有文件进 git，团队共享。**
-
-以下内容在用户本机自动生成，**不进 git**：
+以下内容自动生成在你的电脑上，**不会上传到 git**：
 
 ```
 ~/.bsg-zentao/
-├── config.json    账号密码（仅本机可读）
-├── 缓存/          接口数据缓存（当天有效）
+├── config.json    你的账号密码（仅本机）
+├── 缓存/          当天接口数据缓存
 └── 报告/
     ├── 日报/
     ├── 周汇总/
@@ -71,59 +179,9 @@ bsg-zentao/
 
 ---
 
-## 安装步骤
+## 使用示例
 
-### 第一步：克隆仓库
-
-```bash
-git clone https://github.com/sssguoqiang-art/bsg-zentao.git
-cd bsg-zentao
-```
-
-### 第二步：安装 Python 依赖
-
-```bash
-pip install -r requirements.txt
-```
-
-### 第三步：安装 Skill 到 Claude Code
-
-`bsg-zentao-api.skill` 是禅道接口调用规范，安装后 Claude Code 在处理任何禅道相关任务时会自动参考，确保接口字段准确无误。
-
-在 Claude Code 中输入：
-
-```
-请安装仓库里的 bsg-zentao-api.skill 文件
-```
-
-或在终端中直接运行：
-
-```bash
-claude /path/to/bsg-zentao/bsg-zentao-api.skill
-```
-
-### 第四步：配置禅道账号
-
-```bash
-python setup_config.py
-```
-
-按提示输入禅道账号密码，脚本自动验证登录并保存到本机 `~/.bsg-zentao/config.json`。
-
-### 第五步：注册 MCP Server 到 Claude Code
-
-```bash
-claude mcp add bsg-zentao python ~/bsg-zentao/mcp_server.py
-```
-
-> 路径根据你实际克隆的位置调整，例如克隆到桌面则为：
-> `claude mcp add bsg-zentao python ~/Desktop/bsg-zentao/mcp_server.py`
-
----
-
-## 使用方式
-
-注册完成后，在 Claude Code 中直接用中文提问：
+打开 Claude Code，直接输入：
 
 **生成报告：**
 ```
@@ -135,7 +193,6 @@ claude mcp add bsg-zentao python ~/bsg-zentao/mcp_server.py
 平台项目当前版本还有几天发布？
 线上现在有多少个活跃Bug？
 这个版本有哪些需求还没下单？
-有没有延期超过3天的任务？
 ```
 
 **综合分析：**
@@ -143,62 +200,39 @@ claude mcp add bsg-zentao python ~/bsg-zentao/mcp_server.py
 这个版本交付有风险吗？
 ```
 
-Claude Code 会自动判断需要哪些数据，调用对应工具，用中文回答或生成报告。
-
-生成的报告自动保存到 `~/.bsg-zentao/报告/日报/YYYYMMDD_日报.md`。
-
----
-
-## 关于 bsg-zentao-api.skill
-
-这是禅道接口调用规范的 Skill 文件，记录了所有接口的字段映射、枚举值和调用陷阱，由浏览器逐个接口实测后沉淀而成。
-
-**为什么要安装**：禅道接口字段多、部分字段行为与文档不符，Skill 是已验证的可信规范。Claude Code 处理禅道相关任务时会自动加载，确保生成代码和逻辑与实际接口一致。
-
-**为什么跟代码放一起**：接口会随禅道升级变化。Skill 和代码同仓库管理，接口变更时一起更新，始终保持对齐。
-
----
-
-## 数据缓存
-
-工具缓存当天的接口数据，同一天重复提问不会重复请求禅道接口，响应更快。
-
-手动清除缓存（数据异常时使用）：
-
-```bash
-rm -rf ~/.bsg-zentao/缓存/
-```
-
 ---
 
 ## 常见问题
 
-**Q：提示"配置文件不存在"**
-先运行 `python setup_config.py` 完成初始化。
+**Q：提示「配置文件不存在」**
+运行账号配置脚本：`python3.12 setup_config.py`
 
-**Q：提示"登录失败"**
-检查账号密码是否正确，确认网络能访问禅道内网。
+**Q：提示「登录失败」**
+检查账号密码是否正确，确认电脑网络能访问禅道。
 
-**Q：报告数据不对**
-删除缓存后重新运行：`rm -rf ~/.bsg-zentao/缓存/`
+**Q：报告数据不对或数据很旧**
+清除缓存后重试：
+```bash
+rm -rf ~/.bsg-zentao/缓存/
+```
 
-**Q：想重新配置账号**
-重新运行 `python setup_config.py`，选 `y` 覆盖现有配置。
+**Q：提示「No module named mcp」之类的错误**
+重新安装依赖：`python3.12 -m pip install -r requirements.txt`
 
-**Q：接口字段变了怎么办**
-脚本中的字段探针会自动告警，告知维护者更新 `bsg-zentao-api.skill` 和代码即可，然后重新推到 git，用户重新 pull 即可同步。
+**Q：接口字段变了，数据出现异常**
+通知维护者更新工具，更新后运行 `git pull` 同步即可。
 
 ---
 
-## 当前支持的场景
+## 当前支持的功能
 
-| 场景 | 状态 | 触发方式 |
-|---|---|---|
-| 日报 | ✅ 可用 | "帮我出今天的日报" |
-| 自由问答（版本/Bug/需求） | ✅ 可用 | 直接提问 |
-| 周汇总 | 🔜 开发中 | — |
-| Bug界定 | 🔜 开发中 | — |
-| 版本复盘 | 🔜 开发中 | — |
+| 功能 | 状态 |
+|---|---|
+| 日报生成 | ✅ 可用 |
+| 自由问答（版本 / Bug / 需求） | ✅ 可用 |
+| 周汇总 | 🔜 开发中 |
+| Bug 界定 | 🔜 开发中 |
+| 版本复盘 | 🔜 开发中 |
 
 ---
 
