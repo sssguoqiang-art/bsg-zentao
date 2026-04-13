@@ -4,7 +4,7 @@ mcp_server.py
 MCP Server 入口。
 Claude Code 通过这里调用所有工具。
 
-注册了两类工具：
+注册了三类工具：
   数据工具（原子）：Claude 自由调用，用于回答自由问题
     - zentao_get_versions       获取项目版本列表
     - zentao_get_requirements   获取版本需求池数据
@@ -13,6 +13,12 @@ Claude Code 通过这里调用所有工具。
   报告工具（复合）：用于生成固定格式报告
     - zentao_daily_report       生成并保存日报
     - zentao_save_report        保存 Claude 生成的报告内容到文件
+
+  知识库工具（用户级）：管理个人 Profile 和 Memory
+    - user_get_context          获取用户上下文（每次对话开始时调用）
+    - user_profile_setup        引导式配置个人 Profile
+    - user_memory_view          查看所有记忆
+    - user_memory_manage        管理记忆（确认/拒绝/删除/重置）
 
 启动方式（Claude Code 配置）：
   claude mcp add bsg-zentao python /path/to/bsg-zentao/mcp_server.py
@@ -35,6 +41,12 @@ from mcp.server.models import InitializationOptions
 
 from bsg_zentao.client import ZentaoClient
 from bsg_zentao.constants import ACTIVE_PROJECTS
+from bsg_zentao.user_knowledge import (
+    get_user_context, save_profile, get_profile,
+    add_memory, update_memory_status, delete_memory, reset_memories, reset_memories_by_source,
+    format_memories_for_display, format_profile_for_display,
+    ROLES, DEPARTMENTS, COMMON_TASKS, OUTPUT_PREFERENCES,
+)
 from tools.data_tools import get_versions, get_version_requirements, get_version_bugs
 from tools.report_tools import assemble_daily_report, save_daily_report
 
@@ -203,6 +215,94 @@ async def list_tools() -> list[types.Tool]:
                 "required": ["content", "project_id", "report_type"],
             },
         ),
+
+        # ── 知识库工具1：获取用户上下文 ───────────────────────────────────────
+        types.Tool(
+            name="user_get_context",
+            description=(
+                "获取当前用户的个人知识库上下文，包含 Profile（身份配置）和已确认的 Memory（使用习惯）。"
+                "每次对话开始时应自动调用此工具，将结果作为背景信息用于后续所有回答。"
+                "如果返回'尚未配置'，主动引导用户运行 user_profile_setup。"
+            ),
+            inputSchema={"type": "object", "properties": {}, "required": []},
+        ),
+
+        # ── 知识库工具2：配置 Profile ─────────────────────────────────────────
+        types.Tool(
+            name="user_profile_setup",
+            description=(
+                "引导式配置用户个人 Profile，包括姓名、禅道账号、部门、角色、"
+                "主要关注项目、常用操作、输出偏好。"
+                "首次使用时自动触发，用户说'修改我的配置'/'更新个人信息'时也调用。"
+                "支持部分更新，未传字段保留原值。"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name":            {"type": "string", "description": "姓名"},
+                    "zentao_account":  {"type": "string", "description": "禅道账号（登录用户名）"},
+                    "department":      {"type": "string", "description": f"部门，可选：{'、'.join(DEPARTMENTS)}"},
+                    "role":            {"type": "string", "description": f"角色，可选：{'、'.join(ROLES)}"},
+                    "primary_project": {"type": "string", "description": "主要关注项目：平台项目 / 游戏项目 / 两者"},
+                    "common_tasks":    {"type": "array",  "items": {"type": "string"}, "description": f"常用操作列表，可选：{'、'.join(COMMON_TASKS)}"},
+                    "output_pref":     {"type": "string", "description": f"输出偏好，可选：{'、'.join(OUTPUT_PREFERENCES)}"},
+                },
+                "required": [],
+            },
+        ),
+
+        # ── 知识库工具3：查看记忆 ─────────────────────────────────────────────
+        types.Tool(
+            name="user_memory_view",
+            description=(
+                "查看用户当前的所有记忆，包含已确认、待确认、已拒绝三种状态。"
+                "同时展示 Profile 配置摘要。"
+                "用户说'看看你记住了什么'/'我的记忆'/'知识库'时调用。"
+            ),
+            inputSchema={"type": "object", "properties": {}, "required": []},
+        ),
+
+        # ── 知识库工具4：管理记忆 ─────────────────────────────────────────────
+        types.Tool(
+            name="user_memory_manage",
+            description=(
+                "管理记忆：确认、拒绝、删除某条记忆，或批量重置。"
+                "用户说'记住它'/'不用记'/'删掉这条'/'清空记忆'时调用。"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["confirm", "reject", "delete", "reset_auto", "reset_all", "reset_full", "add"],
+                        "description": (
+                            "操作类型："
+                            "confirm=确认某条待确认记忆（需 memory_id）；"
+                            "reject=拒绝某条待确认记忆（需 memory_id）；"
+                            "delete=删除某条已确认记忆（需 memory_id）；"
+                            "reset_auto=只清系统自动提取的记忆，保留用户手动添加的和 Profile；"
+                            "reset_all=清空所有记忆（Memory 区），保留 Profile；"
+                            "reset_full=清空所有记忆 + Profile，完全重置；"
+                            "add=手动添加一条记忆（需 content，直接进入 confirmed 状态）"
+                        ),
+                    },
+                    "memory_id": {
+                        "type": "string",
+                        "description": "记忆 ID，格式如 mem_20260413_abc123，从 user_memory_view 返回结果中获取。confirm/reject/delete 操作必传。",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "记忆内容，add 操作必传。",
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "标签列表，add 操作可选。",
+                    },
+                },
+                "required": ["action"],
+            },
+        ),
     ]
 
 
@@ -241,23 +341,33 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
         }, ensure_ascii=False))]
 
 
-async def _dispatch(name: str, args: dict[str, Any]) -> Any:
-    """根据工具名称分发到对应处理函数。"""
+# ─── 需要 Zentao 连接的工具集合 ──────────────────────────────────────────────
 
-    client = _get_client()
+_ZENTAO_TOOLS = {
+    "zentao_get_versions", "zentao_get_requirements",
+    "zentao_get_bugs", "zentao_daily_report", "zentao_save_report",
+}
+
+
+async def _dispatch(name: str, args: dict[str, Any]) -> Any:
+    """根据工具名称分发到对应处理函数。
+
+    知识库工具（user_*）不需要 Zentao 连接，直接执行。
+    禅道工具（zentao_*）按需初始化客户端，避免知识库操作触发登录。
+    """
 
     # ── 数据工具1：版本列表 ──────────────────────────────────────────────────
     if name == "zentao_get_versions":
         project_id = args["project_id"]
         log.info("工具调用：zentao_get_versions（project=%s）", project_id)
-        return get_versions(client, project_id)
+        return get_versions(_get_client(), project_id)
 
     # ── 数据工具2：需求池 ────────────────────────────────────────────────────
     elif name == "zentao_get_requirements":
         version_id = args["version_id"]
         project_id = args["project_id"]
         log.info("工具调用：zentao_get_requirements（version=%s）", version_id)
-        data = get_version_requirements(client, version_id, project_id)
+        data = get_version_requirements(_get_client(), version_id, project_id)
         # 返回给 Claude 的精简版本（去掉超大字段 task_details，Claude 不需要原始子任务）
         return {
             "version_id":    data["version_id"],
@@ -276,13 +386,13 @@ async def _dispatch(name: str, args: dict[str, Any]) -> Any:
         version_id = args["version_id"]
         project_id = args["project_id"]
         log.info("工具调用：zentao_get_bugs（version=%s）", version_id)
-        return get_version_bugs(client, version_id, project_id)
+        return get_version_bugs(_get_client(), version_id, project_id)
 
     # ── 报告工具1：日报 ──────────────────────────────────────────────────────
     elif name == "zentao_daily_report":
         project_id = args["project_id"]
         log.info("工具调用：zentao_daily_report（project=%s）", project_id)
-        return assemble_daily_report(client, project_id)
+        return assemble_daily_report(_get_client(), project_id)
 
     # ── 报告工具2：保存报告 ──────────────────────────────────────────────────
     elif name == "zentao_save_report":
@@ -301,6 +411,99 @@ async def _dispatch(name: str, args: dict[str, Any]) -> Any:
             "path":    path,
             "message": f"报告已保存到：{path}",
         }
+
+    # ── 知识库工具1：获取用户上下文 ────────────────────────────────────────
+    elif name == "user_get_context":
+        log.info("工具调用：user_get_context")
+        context = get_user_context()
+        profile = get_profile()
+        return {
+            "context": context,
+            "has_profile": profile is not None,
+            "hint": "请将 context 字段内容作为用户背景信息，用于后续所有回答。" if profile else "用户尚未配置 Profile，建议引导运行 user_profile_setup。",
+        }
+
+    # ── 知识库工具2：配置 Profile ────────────────────────────────────────────
+    elif name == "user_profile_setup":
+        log.info("工具调用：user_profile_setup")
+        # 过滤掉 None 值，只更新传入的字段
+        data = {k: v for k, v in args.items() if v is not None}
+        if not data:
+            # 无参数时返回当前配置 + 引导提示
+            profile = get_profile()
+            return {
+                "current": format_profile_for_display(),
+                "guide": (
+                    "请提供以下信息来配置你的个人知识库：\n"
+                    f"  姓名、禅道账号、部门（{' / '.join(DEPARTMENTS[:5])}…）、"
+                    f"角色（{'、'.join(ROLES)}）、"
+                    "主要关注项目（平台项目/游戏项目/两者）、"
+                    f"常用操作（多选，可选：{'、'.join(COMMON_TASKS[:4])}…）、"
+                    f"输出偏好（{'、'.join(OUTPUT_PREFERENCES)}）"
+                ),
+            }
+        saved = save_profile(data)
+        return {
+            "saved": True,
+            "profile": format_profile_for_display(),
+            "message": "✅ Profile 已更新。下次对话开始时会自动加载这些信息。",
+        }
+
+    # ── 知识库工具3：查看记忆 ──────────────────────────────────────────────────
+    elif name == "user_memory_view":
+        log.info("工具调用：user_memory_view")
+        return {
+            "profile":  format_profile_for_display(),
+            "memories": format_memories_for_display(),
+            "tip": "可以说'删掉[ID]那条'或'清空记忆'来管理记忆。",
+        }
+
+    # ── 知识库工具4：管理记忆 ──────────────────────────────────────────────────
+    elif name == "user_memory_manage":
+        action    = args["action"]
+        memory_id = args.get("memory_id")
+        content   = args.get("content")
+        tags      = args.get("tags", [])
+        log.info("工具调用：user_memory_manage（action=%s）", action)
+
+        if action == "confirm":
+            if not memory_id:
+                raise ValueError("confirm 操作需要 memory_id")
+            ok = update_memory_status(memory_id, "confirmed")
+            return {"success": ok, "message": f"✅ 记忆已确认，将参与后续上下文注入。" if ok else f"未找到记忆 {memory_id}"}
+
+        elif action == "reject":
+            if not memory_id:
+                raise ValueError("reject 操作需要 memory_id")
+            ok = update_memory_status(memory_id, "rejected")
+            return {"success": ok, "message": "❌ 记忆已拒绝，不再参与上下文注入。" if ok else f"未找到记忆 {memory_id}"}
+
+        elif action == "delete":
+            if not memory_id:
+                raise ValueError("delete 操作需要 memory_id")
+            ok = delete_memory(memory_id)
+            return {"success": ok, "message": "🗑️ 记忆已删除。" if ok else f"未找到记忆 {memory_id}"}
+
+        elif action == "reset_auto":
+            deleted = reset_memories_by_source("auto")
+            return {"success": True, "message": f"🗑️ 已清除 {deleted} 条系统自动提取的记忆，用户手动添加的和 Profile 保留。"}
+
+        elif action == "reset_all":
+            result = reset_memories(keep_profile=True)
+            return {"success": True, "message": f"🗑️ 已清除 {result['deleted_memories']} 条记忆，Profile 配置保留。"}
+
+        elif action == "reset_full":
+            result = reset_memories(keep_profile=False)
+            return {"success": True, "message": f"🗑️ 已完全重置：清除 {result['deleted_memories']} 条记忆 + Profile 配置。下次使用需重新配置。"}
+
+        elif action == "add":
+            if not content:
+                raise ValueError("add 操作需要 content")
+            entry = add_memory(content=content, source="user", tags=tags)
+            return {"success": True, "memory_id": entry["id"], "message": f"✅ 记忆已添加（{entry['id']}），立即生效。"}
+
+        else:
+            raise ValueError(f"未知 action：{action}")
 
     else:
         raise ValueError(f"未知工具：{name}")
