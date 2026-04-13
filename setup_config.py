@@ -9,7 +9,8 @@ setup_config.py
   1. 交互式输入禅道账号密码
   2. 验证登录是否成功
   3. 保存配置到 ~/.bsg-zentao/config.json
-  4. 输出 Claude Code 的 MCP 注册命令
+  4. 引导用户完成个人知识库 Profile 配置
+  5. 输出 Claude Code 的 MCP 注册命令
 """
 
 import getpass
@@ -19,6 +20,10 @@ from pathlib import Path
 
 import requests
 import urllib3
+
+# 引入知识库模块（Profile 配置）
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from bsg_zentao.user_knowledge import save_profile, get_profile, ROLES, DEPARTMENTS, COMMON_TASKS, OUTPUT_PREFERENCES
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -116,7 +121,102 @@ def main():
     print("════════════════════════════════════")
     print()
 
+    # 第二步：引导配置个人知识库 Profile
+    _setup_profile(account)
+
     _print_mcp_command()
+
+
+def _setup_profile(zentao_account: str):
+    """交互式引导用户完成个人 Profile 配置。"""
+    print()
+    print("════════════════════════════════════")
+    print("  第二步：配置个人知识库")
+    print("════════════════════════════════════")
+    print()
+    print("知识库帮助系统记住你的身份和使用习惯，越用越懂你。")
+    print("以下信息可以随时在 Claude Code 中说"修改我的配置"来更新。")
+    print()
+
+    # 如果已有 Profile，询问是否重新配置
+    existing = get_profile()
+    if existing:
+        overwrite = input("检测到已有个人配置，是否重新设置？(y/N) ").strip().lower()
+        if overwrite != "y":
+            print("  保留现有配置，跳过。")
+            return
+        print()
+
+    data = {"zentao_account": zentao_account}
+
+    # 姓名
+    name = input("你的姓名（如：张三）：").strip()
+    if name:
+        data["name"] = name
+
+    # 部门
+    print()
+    print("所在部门：")
+    for i, dept in enumerate(DEPARTMENTS, 1):
+        print(f"  {i}. {dept}")
+    dept_input = input(f"输入序号（1-{len(DEPARTMENTS)}）或直接输入部门名：").strip()
+    if dept_input.isdigit() and 1 <= int(dept_input) <= len(DEPARTMENTS):
+        data["department"] = DEPARTMENTS[int(dept_input) - 1]
+    elif dept_input:
+        data["department"] = dept_input
+
+    # 角色
+    print()
+    print("你的角色：")
+    for i, role in enumerate(ROLES, 1):
+        print(f"  {i}. {role}")
+    role_input = input(f"输入序号（1-{len(ROLES)}）：").strip()
+    if role_input.isdigit() and 1 <= int(role_input) <= len(ROLES):
+        data["role"] = ROLES[int(role_input) - 1]
+
+    # 主要关注项目
+    print()
+    projects = ["平台项目", "游戏项目", "两者"]
+    print("主要关注项目：")
+    for i, p in enumerate(projects, 1):
+        print(f"  {i}. {p}")
+    proj_input = input("输入序号（1-3）：").strip()
+    if proj_input.isdigit() and 1 <= int(proj_input) <= len(projects):
+        data["primary_project"] = projects[int(proj_input) - 1]
+
+    # 常用操作（多选）
+    print()
+    print("常用操作（多选，用逗号分隔序号，如：1,3,4）：")
+    for i, task in enumerate(COMMON_TASKS, 1):
+        print(f"  {i}. {task}")
+    tasks_input = input("输入序号：").strip()
+    if tasks_input:
+        selected = []
+        for idx in tasks_input.split(","):
+            idx = idx.strip()
+            if idx.isdigit() and 1 <= int(idx) <= len(COMMON_TASKS):
+                selected.append(COMMON_TASKS[int(idx) - 1])
+        if selected:
+            data["common_tasks"] = selected
+
+    # 输出偏好
+    print()
+    print("输出偏好：")
+    for i, pref in enumerate(OUTPUT_PREFERENCES, 1):
+        print(f"  {i}. {pref}")
+    pref_input = input("输入序号（1-2）：").strip()
+    if pref_input.isdigit() and 1 <= int(pref_input) <= len(OUTPUT_PREFERENCES):
+        data["output_pref"] = OUTPUT_PREFERENCES[int(pref_input) - 1]
+
+    # 保存
+    save_profile(data)
+    print()
+    print("════════════════════════════════════")
+    print("  ✅ 个人知识库配置完成！")
+    if data.get("name"):
+        print(f"  你好，{data['name']}！系统已记住你的信息。")
+    print("════════════════════════════════════")
+    print()
 
 
 def _print_mcp_command():
