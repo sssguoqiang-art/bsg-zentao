@@ -4,17 +4,19 @@ tools/calc_review.py
 版本复盘计算层：从精简后的 Bug 数据和需求池数据中计算复盘所需的各板块数据。
 
 对外暴露：
-  calc_ext_bugs(bugs, dept_review)             → 外部Bug分组 + 深度分析数据
-  calc_int_bugs(bugs, dept_review)             → 内部Bug分组 + 深度分析数据
-  calc_low_quality(pools, bugs, dept_review)   → 低质量任务排名（使用 pool.bug_total，数据准确）
-  calc_req_counts(pools)                       → 版本需求数量统计
+  calc_ext_bugs(bugs, dept_review)                          → 外部Bug分组 + 深度分析数据
+  calc_int_bugs(bugs, dept_review)                          → 内部Bug分组 + 深度分析数据
+  calc_low_quality(pools, bugs, dept_review,
+                   task_details, php_member_map)            → 低质量任务排名（含主要部门）
+  calc_req_counts(pools)                                    → 版本需求数量统计
 """
 
+import re
 from collections import Counter
 from typing import Optional
 
 from bsg_zentao.constants import (
-    DEPT_MAP, to_display,
+    DEPT_MAP, TASK_DETAIL_DEPT_MAP, to_display,
     ONLINE_BUG_CLASSIFICATIONS, INTERNAL_BUG_CLASSIFICATIONS,
 )
 
@@ -76,10 +78,6 @@ def _is_dispute(bug: dict, dept_review: dict) -> bool:
 
 
 def _get_review_detail(dept_review: dict, bug_id: str, dept_id: str) -> tuple[str, str]:
-    """
-    取某部门对某 Bug 的 causeAnalysis / nextStep。
-    review 字段有两种结构：未填写时为 []；已填写时为 dict 或 list。
-    """
     dr     = dept_review.get(str(bug_id), {})
     review = dr.get("review", {})
     if isinstance(review, list):
@@ -89,19 +87,28 @@ def _get_review_detail(dept_review: dict, bug_id: str, dept_id: str) -> tuple[st
         )
     else:
         item = (review or {}).get(str(dept_id), {})
-
     cause = (item.get("causeAnalysis") or "").strip()
     step  = (item.get("nextStep")      or "").strip()
     return cause or _IFACE, step or _IFACE
 
 
 def _excl_reason(bug: dict) -> str:
-    """生成非Bug剔除原因（从 type + tracing_back 推断）"""
+    """
+    非Bug剔除原因（单行，严格清除换行/URL，适合 Markdown 表格单元格）。
+    ⚠️ 必须保证输出不含 \\n，否则会破坏表格行结构。
+    """
     if "performance" in (bug.get("type") or ""):
         tracing = (bug.get("tracing_back") or "").strip()
         if tracing:
-            short = tracing[:30] + ("…" if len(tracing) > 30 else "")
-            return f"优化项：{short}"
+            # 严格清理：去URL → 去HTML实体 → 换行变空格 → 去多余空白
+            clean = re.sub(r'https?://\S+', '', tracing)
+            clean = re.sub(r'&\w+;', '', clean)
+            clean = re.sub(r'[\n\r\t]', ' ', clean)
+            clean = re.sub(r'\s{2,}', ' ', clean).strip()
+            # 去掉 "现象：" "原因：" 等前缀标签，只保留描述内容
+            clean = re.sub(r'^(现象|原因|环境)[\uff1a:]\s*', '', clean)
+            if clean:
+                return f"优化项：{clean[:25]}{'…' if len(clean) > 25 else ''}"
         return "优化项"
     return _MANUAL
 
@@ -115,22 +122,67 @@ def _severity_label(bug: dict, with_scope: bool = False) -> str:
     return label
 
 
+def _get_task_main_dept(task_id: str, task_details: dict, php_member_map: dict) -> str:
+    """
+    从 task_details 推断任务的主要责任部门（按消耗工时最多的部门）。
+    devel 类型的子任务通过 php_member_map 区分 PHP1/PHP2。
+    """
+    td = task_details.get(str(task_id), {})
+    if not td:
+        return _MANUAL
+
+    dept_hours: dict[str, float] = {}
+
+    for dept_key, subs in td.items():
+        if not isinstance(subs, list):
+            continue
+        active_subs = [s for s in subs if str(s.get("deleted", "0")) != "1"]
+        if not active_subs:
+            continue
+
+        if dept_key == "devel":
+            php1_h = php2_h = 0.0
+            for s in active_subs:
+                person   = s.get("finishedBy") or s.get("assignedTo") or ""
+                dept_raw = php_member_map.get(person, "")
+                consumed = float(s.get("consumed", 0) or 0)
+                if dept_raw == "PHP1部":
+                    php1_h += consumed
+                elif dept_raw == "PHP2部":
+                    php2_h += consumed
+            if php1_h > 0 or php2_h > 0:
+                dept_hours["PHP1组"] = dept_hours.get("PHP1组", 0) + php1_h
+                dept_hours["PHP2组"] = dept_hours.get("PHP2组", 0) + php2_h
+            else:
+                # phpGroup 为空时保守标注
+                total = sum(float(s.get("consumed", 0) or 0) for s in active_subs)
+                dept_hours["开发组"] = dept_hours.get("开发组", 0) + total
+
+        elif dept_key == "qa":
+            total = sum(float(s.get("consumed", 0) or 0) for s in active_subs)
+            dept_hours["测试组"] = dept_hours.get("测试组", 0) + total
+
+        elif dept_key == "design":
+            total = sum(float(s.get("consumed", 0) or 0) for s in active_subs)
+            dept_hours["产品组"] = dept_hours.get("产品组", 0) + total
+
+        elif dept_key in TASK_DETAIL_DEPT_MAP:
+            raw  = TASK_DETAIL_DEPT_MAP[dept_key]
+            disp = to_display(raw)
+            total = sum(float(s.get("consumed", 0) or 0) for s in active_subs)
+            dept_hours[disp] = dept_hours.get(disp, 0) + total
+
+    if not dept_hours:
+        return _MANUAL
+
+    # 取工时最多的部门
+    main_dept = max(dept_hours, key=lambda k: dept_hours[k])
+    return main_dept
+
+
 # ─── 外部 Bug 计算 ─────────────────────────────────────────────────────────────
 
 def calc_ext_bugs(bugs: list[dict], dept_review: dict) -> dict:
-    """
-    外部Bug分组和深度分析数据整理。
-
-    返回：
-    {
-      all_count, review_count, excl_count,
-      excl_list:     [{id, title, link, excl_reason}]
-      review_list:   [{id, title, link, severity_label, dept_str, is_dispute}]
-      test_dept_count, test_bug_ids,
-      other_dept_dist: {dept_name: count}
-      deep_analysis: [{id, title, link, severity_label, tracing, depts:[{id,name,cause,step,is_dispute}]}]
-    }
-    """
     ext_all    = [b for b in bugs if b.get("classification") in ONLINE_BUG_CLASSIFICATIONS]
     ext_review = [b for b in ext_all if "performance" not in (b.get("type") or "")]
     ext_excl   = [b for b in ext_all if "performance"     in (b.get("type") or "")]
@@ -212,17 +264,6 @@ def calc_ext_bugs(bugs: list[dict], dept_review: dict) -> dict:
 # ─── 内部 Bug 计算 ─────────────────────────────────────────────────────────────
 
 def calc_int_bugs(bugs: list[dict], dept_review: dict) -> dict:
-    """
-    内部Bug分组和深度分析数据整理。
-
-    返回：
-    {
-      total_count, extreme_count, high_count,
-      extreme_dept_dist, high_dept_dist,
-      review_list:   [{id, title, link, severity_label, dept_str, is_typical}]
-      deep_analysis: [{id, title, link, severity_label, is_typical, depts}]
-    }
-    """
     int_all = [
         b for b in bugs
         if  b.get("classification") in INTERNAL_BUG_CLASSIFICATIONS
@@ -239,7 +280,6 @@ def calc_int_bugs(bugs: list[dict], dept_review: dict) -> dict:
                 cnt[to_display(DEPT_MAP.get(d, f"部门{d}"))] += 1
         return dict(cnt.most_common())
 
-    # 复盘列表：极/高 + 典型，去重，按严重程度升序
     seen = set()
     review_list = []
     for b in sorted(int_all, key=lambda x: int(x.get("severity") or 9)):
@@ -308,20 +348,18 @@ def calc_low_quality(
     pools: list[dict],
     bugs: list[dict],
     dept_review: dict,
+    task_details: Optional[dict] = None,
+    php_member_map: Optional[dict] = None,
     min_bug_count: int = 5,
 ) -> list[dict]:
     """
     按 Bug 数量排名低质量任务。
 
-    ⚠️ 关键修复：使用 pool.bug_total（来自 associatedBugStat.total）作为 Bug 计数，
-    而非从 bug.main_task_id 反向计数。pool.bug_total 是服务端预聚合值，
-    包含主任务和所有子任务的关联 Bug，数据准确。
+    使用 pool.bug_total（associatedBugStat.total）作为 Bug 计数。
+    主要部门通过 task_details + php_member_map 推断（按消耗工时最多的部门）。
 
-    含高/极Bug 数：从 bugs 列表中按 main_task_id 匹配（辅助统计，不影响排名）。
-
-    返回：[{rank, task_id, name, link, bug_count, high_extreme_count, judgment_prefix}]
+    返回：[{rank, task_id, name, link, bug_count, high_extreme_count, main_dept, judgment_prefix}]
     """
-    # 从 bugs 构建 task_id → 高/极 Bug 数的映射（辅助）
     high_ext_by_task: Counter = Counter()
     for b in bugs:
         tid = b.get("main_task_id")
@@ -335,6 +373,13 @@ def calc_low_quality(
             break
         tid  = str(p.get("task_id") or "")
         name = (p.get("title") or "").strip()
+
+        # 主要部门：从 task_details 推断
+        if task_details is not None and php_member_map is not None:
+            main_dept = _get_task_main_dept(tid, task_details, php_member_map)
+        else:
+            main_dept = _MANUAL
+
         result.append({
             "rank":               len(result) + 1,
             "task_id":            tid,
@@ -342,6 +387,7 @@ def calc_low_quality(
             "link":               _task_link(tid, name) if tid and name else _MANUAL,
             "bug_count":          cnt,
             "high_extreme_count": high_ext_by_task.get(tid, 0),
+            "main_dept":          main_dept,
             "judgment_prefix":    "🔴提测质量差" if cnt >= 20 else "🟡提测质量需关注",
         })
 

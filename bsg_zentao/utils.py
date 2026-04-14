@@ -146,13 +146,8 @@ def make_weekly_filename(today: date | None = None) -> str:
 
 
 def make_review_filename(version_name: str) -> str:
-    m = re.search(r'（(\d{4})）', version_name)
-    if m:
-        mmdd = m.group(1)
-        year = date.today().year
-        date_prefix = f"{year}{mmdd}"
-    else:
-        date_prefix = date.today().strftime("%Y%m%d")
-    base = version_name.split("（")[0].strip()
-    safe_base = re.sub(r'[\\/:*?"<>|]', "", base)
-    return f"{date_prefix}_{safe_base}_版本复盘.md"
+    """
+    生成版本复盘文件名，格式与 OB 一致：「版本复盘 · V2.11.0（0408）.md」
+    """
+    safe_vname = re.sub(r'[\\/:*?"<>|]', '', version_name).strip()
+    return f"版本复盘 · {safe_vname}.md"
