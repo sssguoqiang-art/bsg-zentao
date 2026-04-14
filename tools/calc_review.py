@@ -67,6 +67,10 @@ def _dept_names_for_bug(bug: dict, dept_review: dict) -> list[str]:
 
 
 def _is_dispute(bug: dict, dept_review: dict) -> bool:
+    # slim_bug 已直接解析 isDispute 字段，优先使用
+    if bug.get("is_dispute"):
+        return True
+    # 备用：从 deptReview 读取
     dr = dept_review.get(str(bug.get("id", "")), {})
     return str(dr.get("isDispute", "0")) == "1"
 
