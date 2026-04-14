@@ -17,11 +17,11 @@
 
 **知识库工具触发词对照表：**
 
-| 用户说的话 | 调用工具 |
-|---|---|
+| 用户说的话                                                                  | 调用工具                 |
+| ---------------------------------------------------------------------- | -------------------- |
 | 帮我配置知识库 / 帮我更新知识库 / 修改我的配置 / 更新个人信息 / 重新配置 / 我要改配置 / 帮我设置个人信息 / 更新我的资料 | `user_profile_setup` |
-| 看看你记住了什么 / 查看我的知识库 / 我的记忆 / 知识库里有什么 / 你都记了什么 / 帮我看下知识库 | `user_memory_view` |
-| 记住它 / 帮我记住 / 不用记 / 删掉这条 / 清空记忆 / 清空我的知识库 / 重置知识库 / 完全重置知识库 | `user_memory_manage` |
+| 看看你记住了什么 / 查看我的知识库 / 我的记忆 / 知识库里有什么 / 你都记了什么 / 帮我看下知识库                 | `user_memory_view`   |
+| 记住它 / 帮我记住 / 不用记 / 删掉这条 / 清空记忆 / 清空我的知识库 / 重置知识库 / 完全重置知识库             | `user_memory_manage` |
 
 **确认机制（方案 C）：**
 
@@ -235,6 +235,9 @@ env == "require" 且未完成的需求
 | 交付风险综合判断      | 三个工具都调用                                           |
 | 生成日报          | `zentao_daily_report`                             |
 | 生成周汇总         | `zentao_weekly_report`                            |
+| 生成版本复盘（正式复盘文档） | `zentao_version_review`                      |
+| 生成Bug界定（预分类材料） | `zentao_bug_review`                          |
+| 只说『复盘』无其他修饰   | 先确认：『版本复盘报告』还是『Bug界定预分类』？           |
 
 **多项目处理**：用户未指定项目时，询问："您想查看哪个项目的数据？"并列出可选项目列表。
 
@@ -249,6 +252,188 @@ env == "require" 且未完成的需求
 3. **SG项目版本名**：版本名为纯日期格式（如 `0413`），无版本号，展示时直接用版本名。
 
 4. **mainTaskId 类型不一致**：Bug 对象的此字段可能是 int 或 string，代码层已统一处理，Claude 无需关注。
+
+---
+
+## 十、Bug 界定预分类规则
+
+> 每次版本发布后（通常周三晚），运行 `zentao_bug_review` 工具，Claude 根据数据生成预分类报告。
+
+### 10.1 核心数据过滤
+
+```
+原始 Bug 数据（全量）
+  ├── type=performance（外部）→ 疑似非Bug区块（不做归属分析，人工确认）
+  ├── type=performance（内部）→ 从总量排除，不出现在报告中
+  ├── classification in (1,2) AND type≠performance → 外部Bug责任界定
+  └── classification in (4,5) AND (severity in (1,2) OR isTypical=1) AND type≠performance → 内部Bug责任界定
+```
+
+**⚠️ 关键区分：**
+- `type=performance` = 非Bug，排除
+- `bugTypeParent=4` = 用户体验，**不是非Bug，正常参与复盘**（手册7.6有误，以此为准）
+
+### 10.2 责任部门获取（严格优先级）
+
+```
+ownerDept（非空时直接用）
+  → deptReview[bugId].depts（兜底）
+  → 空：标注"未归属（待填）"
+```
+
+**⚠️ 禁止回落到 `deptName`**：该字段是 Bug 处理人归属，不是责任部门。
+
+### 10.3 争议预警信号（命中任一 → 归属类型 = "争议"）
+
+| 信号 | 说明 |
+|---|---|
+| `isDispute == "1"` | 已手动标记争议，最高优先级 |
+| ownerDept 空 且 deptReview.depts 空 | 无归属信息 |
+| causeAnalysis/tracingBack 空或无效 | 溯源缺失 |
+| `resolution == "external"` | 疑似非Bug（配置/部署）|
+| `resolution == "tostory"` | 已转需求 |
+| causeAnalysis 含需求分歧关键词 | 见下方列表 |
+
+**需求分歧关键词（匹配任一即触发）：**
+```python
+"需求如此", "需求未提到", "需求不清晰", "需求没写", "需求有歧义",
+"需求没提", "需求未提及", "需求未明确", "需求无说明"
+```
+
+### 10.4 测试责任标注（仅外部Bug）
+
+| 情形 | 标注 |
+|---|---|
+| 常规功能，测试应有用例 | `+ 测试次责` |
+| `resolution=external/tostory` | `；测试不担责` |
+| `bugTypeParent=2`（产品Bug）或含"转需求" | `；测试不担责` |
+| 无归属信息（争议） | `；测试责任待定` |
+
+### 10.5 报告输出结构（固定四部分）
+
+```
+## 一、部门 Bug 数量总览
+  - 外部Bug + 内部Bug（极/高/典型）合计，按合计降序
+  - 未归属单列最后
+  - 注：type=performance 外部Bug 不计入此表
+
+## 二、疑似非Bug 清单（type=performance 外部Bug）
+  - 仅列 Bug ID / 标题 / causeAnalysis / resolution
+  - 统一备注"type=performance，建议人工确认是否为非Bug"
+  - 若无 type=performance 外部Bug，注明"本版本无疑似非Bug"
+
+## 三、外部 Bug 责任界定
+  - 仅 classification(1,2) AND type≠performance
+  - 列：序号|BugID|标题|等级|影响范围|归属判定|责任部门|溯源摘要|归属类型|判定输出
+
+## 四、内部 Bug 责任界定
+  - 仅 classification(4,5) AND severity(1,2)/typical AND type≠performance
+  - 列：序号|BugID|标题|关联主任务|等级|是否典型|归属判定|责任部门|溯源摘要|归属类型|判定输出
+  - 末尾注明中/低等级总数
+
+## 五、低质量任务
+  - 单任务关联Bug≥5 或 含极/高/典型Bug≥1
+
+## 复盘会前 To-Do
+  - 🔴 溯源空/无效；需产品提供需求文档的争议
+  - 🟡 resolution=external/tostory 定性；ownerDept空待补；建议类外部确认
+  - 🟢 测试部核实用例
+```
+
+### 10.6 触发方式
+
+用户说「帮我出Bug界定报告」/ 「出预分类」/ 「复盘预分类」时调用 `zentao_bug_review`。
+
+---
+
+## 十、Bug 界定预分类规则
+
+> 每次版本发布后（通常周三晚），运行 `zentao_bug_review` 工具，Claude 根据数据生成预分类报告。
+
+### 10.1 核心数据过滤
+
+```
+原始 Bug 数据（全量）
+  ├── type=performance（外部）→ 疑似非Bug区块（不做归属分析，人工确认）
+  ├── type=performance（内部）→ 从总量排除，不出现在报告中
+  ├── classification in (1,2) AND type≠performance → 外部Bug责任界定
+  └── classification in (4,5) AND (severity in (1,2) OR isTypical=1) AND type≠performance → 内部Bug责任界定
+```
+
+**⚠️ 关键区分：**
+- `type=performance` = 非Bug，排除
+- `bugTypeParent=4` = 用户体验，**不是非Bug，正常参与复盘**（手册7.6有误，以此为准）
+
+### 10.2 责任部门获取（严格优先级）
+
+```
+ownerDept（非空时直接用）
+  → deptReview[bugId].depts（兜底）
+  → 空：标注"未归属（待填）"
+```
+
+**⚠️ 禁止回落到 `deptName`**：该字段是 Bug 处理人归属，不是责任部门。
+
+### 10.3 争议预警信号（命中任一 → 归属类型 = "争议"）
+
+| 信号 | 说明 |
+|---|---|
+| `isDispute == "1"` | 已手动标记争议，最高优先级 |
+| ownerDept 空 且 deptReview.depts 空 | 无归属信息 |
+| causeAnalysis/tracingBack 空或无效 | 溯源缺失 |
+| `resolution == "external"` | 疑似非Bug（配置/部署）|
+| `resolution == "tostory"` | 已转需求 |
+| causeAnalysis 含需求分歧关键词 | 见下方列表 |
+
+**需求分歧关键词（匹配任一即触发）：**
+```python
+"需求如此", "需求未提到", "需求不清晰", "需求没写", "需求有歧义",
+"需求没提", "需求未提及", "需求未明确", "需求无说明"
+```
+
+### 10.4 测试责任标注（仅外部Bug）
+
+| 情形 | 标注 |
+|---|---|
+| 常规功能，测试应有用例 | `+ 测试次责` |
+| `resolution=external/tostory` | `；测试不担责` |
+| `bugTypeParent=2`（产品Bug）或含"转需求" | `；测试不担责` |
+| 无归属信息（争议） | `；测试责任待定` |
+
+### 10.5 报告输出结构（固定四部分）
+
+```
+## 一、部门 Bug 数量总览
+  - 外部Bug + 内部Bug（极/高/典型）合计，按合计降序
+  - 未归属单列最后
+  - 注：type=performance 外部Bug 不计入此表
+
+## 二、疑似非Bug 清单（type=performance 外部Bug）
+  - 仅列 Bug ID / 标题 / causeAnalysis / resolution
+  - 统一备注"type=performance，建议人工确认是否为非Bug"
+  - 若无 type=performance 外部Bug，注明"本版本无疑似非Bug"
+
+## 三、外部 Bug 责任界定
+  - 仅 classification(1,2) AND type≠performance
+  - 列：序号|BugID|标题|等级|影响范围|归属判定|责任部门|溯源摘要|归属类型|判定输出
+
+## 四、内部 Bug 责任界定
+  - 仅 classification(4,5) AND severity(1,2)/typical AND type≠performance
+  - 列：序号|BugID|标题|关联主任务|等级|是否典型|归属判定|责任部门|溯源摘要|归属类型|判定输出
+  - 末尾注明中/低等级总数
+
+## 五、低质量任务
+  - 单任务关联Bug≥5 或 含极/高/典型Bug≥1
+
+## 复盘会前 To-Do
+  - 🔴 溯源空/无效；需产品提供需求文档的争议
+  - 🟡 resolution=external/tostory 定性；ownerDept空待补；建议类外部确认
+  - 🟢 测试部核实用例
+```
+
+### 10.6 触发方式
+
+用户说「帮我出Bug界定报告」/ 「出预分类」/ 「复盘预分类」时调用 `zentao_bug_review`。
 
 ---
 
@@ -469,3 +654,102 @@ env == "require" 且未完成的需求
 - 「上周跟进项结果」首次生成时跳过，后续版本支持从上周报告自动读取
 - 风险等级由 Claude 基于数据研判，不由脚本硬判断
 - 「待会议讨论」的问题由 Claude 主动提出，不是占位符，要基于数据有实质内容
+
+---
+
+## 十、Bug 界定预分类规则
+
+> 每次版本发布后（通常周三晚），运行 `zentao_bug_review` 工具，Claude 根据数据生成预分类报告。
+
+### 10.1 核心数据过滤
+
+```
+原始 Bug 数据（全量）
+  ├── type=performance（外部）→ 疑似非Bug区块（不做归属分析，人工确认）
+  ├── type=performance（内部）→ 从总量排除，不出现在报告中
+  ├── classification in (1,2) AND type≠performance → 外部Bug责任界定
+  └── classification in (4,5) AND (severity in (1,2) OR isTypical=1) AND type≠performance → 内部Bug责任界定
+```
+
+**⚠️ 关键区分：**
+- `type=performance` = 非Bug，排除
+- `bugTypeParent=4` = 用户体验，**不是非Bug，正常参与复盘**（Bug归因裁判手册7.6有误，以此处为准）
+
+### 10.2 责任部门获取（严格优先级）
+
+```
+ownerDept（非空时直接用）
+  → deptReview[bugId].depts（兜底）
+  → 空：标注"未归属（待填）"
+```
+
+**⚠️ 禁止回落到 `deptName`**：该字段是 Bug 处理人归属，不是责任部门。
+
+### 10.3 争议预警信号（命中任一 → 归属类型 = "争议"）
+
+| 信号 | 说明 |
+|---|---|
+| `isDispute == "1"` | 已手动标记争议，最高优先级 |
+| ownerDept 空 且 deptReview.depts 空 | 无归属信息 |
+| causeAnalysis/tracingBack 空或无效（纯数字/单字）| 溯源缺失 |
+| `resolution == "external"` | 疑似非Bug（配置/部署）|
+| `resolution == "tostory"` | 已转需求 |
+| causeAnalysis/tracingBack 含需求分歧关键词 | 见下方列表 |
+
+**需求分歧关键词（匹配任一即触发争议）：**
+```python
+"需求如此", "需求未提到", "需求不清晰", "需求没写", "需求有歧义",
+"需求没提", "需求未提及", "需求未明确", "需求无说明"
+```
+
+### 10.4 测试责任标注（仅外部Bug）
+
+| 情形 | 标注 |
+|---|---|
+| 常规功能，测试应有用例覆盖 | `+ 测试次责` |
+| `resolution=external` 或 `tostory` | `；测试不担责` |
+| `bugTypeParent=2`（产品Bug）或含"转需求" | `；测试不担责` |
+| 无归属信息（争议状态） | `；测试责任待定` |
+
+### 10.5 报告输出结构（固定五部分，无 To-Do）
+
+```
+## 头部摘要卡（四格）
+  外部复盘Bug（含争议X条）/ 内部复盘Bug（含争议X条）/ 低质量任务X个 / 疑似非Bug X条
+
+## 一、部门 Bug 数量总览
+  外部Bug + 内部Bug（极/高/典型）合计，按合计降序
+  未归属单列最后；type=performance 外部Bug 不计入此表
+
+## 二、疑似非Bug 清单（type=performance 外部Bug）
+  列：BugID / Bug现象 / 溯源摘要 / resolution / 建议
+  无此类Bug时：注明"本版本无疑似非Bug"
+
+## 三、外部 Bug 责任界定（卡片式，每条Bug三行）
+  范围：classification in (1,2) AND type≠performance
+  表头行：BugID | 等级 | 责任部门（+测试责任） | 归属类型 | 复盘建议
+  展开行1：Bug现象（从标题推断）
+  展开行2：影响范围（_assess_impact推断）
+  展开行3：可能原因（causeAnalysis/tracingBack，含建议/争议说明）
+  复盘建议取值：建议复盘 / 需会前确认 / 复盘价值有限
+
+## 四、内部 Bug 责任界定（卡片式，每条Bug三行）
+  范围：classification in (4,5) AND severity in (1,2)/isTypical=1 AND type≠performance
+  表头行：BugID | 等级 | 典型 | 责任部门 | 归属类型 | 复盘建议
+  展开行1：Bug现象
+  展开行2：可能原因（内部Bug无影响范围）
+  展开行3：预测争议点（dispute_reason，无争议时写"无明显争议"）
+  末尾注明中/低等级内部Bug总数
+
+## 五、低质量任务
+  识别标准：Bug数≥5 OR 含极/高/典型Bug≥1
+  输出：任务名 / Bug总数 / 高缺陷数 / 低质量维度标签列表 / 根因类型 / 改进建议方向
+  根因类型：提测质量差 / 需求质量差 / 混合型
+  关注任务：Bug数≥2 但未达低质量标准（只列名称和数量）
+```
+
+**⚠️ 无 To-Do 模块**：复盘建议已内嵌在每条Bug的「复盘建议」字段中，不单独输出 To-Do 列表。
+
+### 10.6 触发方式
+
+用户说「帮我出Bug界定报告」/ 「出预分类」/ 「复盘预分类」/ 「Bug界定」时调用 `zentao_bug_review`。

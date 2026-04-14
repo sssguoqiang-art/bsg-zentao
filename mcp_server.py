@@ -12,8 +12,8 @@ Claude Code 通过这里调用所有工具。
 
   报告工具（复合）：用于生成固定格式报告
     - zentao_daily_report       生成并保存日报
-    - zentao_version_review     生成版本复盘数据包
-    - zentao_bug_review         生成 Bug 复盘预分类数据包
+    - zentao_version_review     【版本复盘】复盘会上展示的正式复盘报告
+    - zentao_bug_review         【Bug界定】复盘会前的预分类准备材料（与版本复盘是两件不同的事）
     - zentao_save_report        保存 Claude 生成的报告内容到文件
 
   知识库工具（用户级）：管理个人 Profile 和 Memory
@@ -21,6 +21,13 @@ Claude Code 通过这里调用所有工具。
     - user_profile_setup        引导式配置个人 Profile
     - user_memory_view          查看所有记忆
     - user_memory_manage        管理记忆（确认/拒绝/删除/重置）
+
+⚠️ Bug界定 vs 版本复盘 区分规则（重要）：
+  【版本复盘】= 复盘会上展示的正式文档，包含趋势分析、深度复盘、管理结论
+              触发词：版本复盘 / 出复盘 / 复盘报告 / 帮我出这个版本的复盘
+  【Bug界定】= 复盘会前的预分类准备材料，帮助判断哪些Bug值得复盘、归属是什么
+              触发词：Bug界定 / 预分类 / Bug预分类 / 界定报告 / 复盘前准备
+  用户只说"复盘"时，必须先询问："你要的是【版本复盘报告】还是【Bug界定预分类】？"
 
 启动方式（Claude Code 配置）：
   claude mcp add bsg-zentao python /path/to/bsg-zentao/mcp_server.py
@@ -30,6 +37,7 @@ Claude Code 通过这里调用所有工具。
   "平台项目当前有多少线上bug" → Claude 调用 zentao_get_bugs
   "这个版本交付有风险吗"      → Claude 调用 zentao_get_versions + zentao_get_requirements
   "帮我出Bug界定报告"         → Claude 调用 zentao_bug_review
+  "帮我出版本复盘"            → Claude 调用 zentao_version_review
 """
 
 import json
@@ -192,12 +200,18 @@ async def list_tools() -> list[types.Tool]:
         ),
 
         # ── 报告工具2：版本复盘 ────────────────────────────────────────────────
+        # ⚠️ 这是"版本复盘报告"，不是"Bug界定预分类"，两者是完全不同的东西
         types.Tool(
             name="zentao_version_review",
             description=(
-                "生成版本复盘数据包，包含外部Bug复盘、内部Bug复盘、版本需求趋势等完整数据。\n"
-                "调用后由 Claude 根据数据包生成复盘报告 Markdown 文本，再调用 zentao_save_report 保存。\n\n"
-                "报告三段式结构：一、外部Bug复盘 → 二、内部Bug复盘 → 三、版本复盘"
+                "【版本复盘报告】工具——生成复盘会上展示的正式复盘文档。\n"
+                "包含：外部Bug复盘（趋势+深度分析）/ 内部Bug复盘 / 版本需求趋势 / 延期分析。\n\n"
+                "以下表达触发此工具（必须含'版本复盘'或'复盘报告'等明确意图）：\n"
+                "  '帮我出版本复盘' / '生成复盘报告' / '出复盘' / '复盘报告' / '帮我出这个版本的复盘'\n\n"
+                "⚠️ 与 Bug界定 的区别：\n"
+                "  版本复盘 = 复盘会上展示的正式文档，有历史趋势、管理结论\n"
+                "  Bug界定  = 复盘会前的预分类准备材料（用 zentao_bug_review 工具）\n"
+                "用户只说'复盘'时，必须先询问是要'版本复盘报告'还是'Bug界定预分类'。"
             ),
             inputSchema={
                 "type": "object",
@@ -224,19 +238,20 @@ async def list_tools() -> list[types.Tool]:
         ),
 
         # ── 报告工具3：Bug 界定预分类 ──────────────────────────────────────────
+        # ⚠️ 这是"Bug界定预分类"，不是"版本复盘报告"，两者是完全不同的东西
         types.Tool(
             name="zentao_bug_review",
             description=(
-                "生成 Bug 复盘预分类数据包，包含外部Bug责任界定、内部Bug责任界定、低质量任务识别。\n"
-                "调用后由 Claude 根据数据包生成 Markdown 格式预分类报告。\n\n"
-                "五部分固定结构：\n"
-                "  一、部门 Bug 数量总览\n"
-                "  二、疑似非Bug清单（type=performance 外部Bug）\n"
-                "  三、外部 Bug 责任界定\n"
-                "  四、内部 Bug 责任界定\n"
-                "  五、低质量任务\n"
-                "  复盘会前 To-Do\n\n"
-                "用户说「帮我出Bug界定报告」/「出预分类」/「复盘预分类」/「Bug界定」时调用此工具。"
+                "【Bug界定预分类】工具——生成复盘会前的预分类准备材料。\n"
+                "帮助判断哪些Bug值得复盘、各Bug归属是什么、哪些任务质量有问题。\n"
+                "通常在版本发布后（周三晚）运行，供周四/五复盘会使用。\n\n"
+                "输出五部分：部门Bug总览 / 疑似非Bug清单 / 外部Bug界定 / 内部Bug界定 / 低质量任务。\n\n"
+                "以下表达触发此工具（必须含'Bug界定'或'预分类'等明确意图）：\n"
+                "  'Bug界定' / '出界定报告' / 'Bug预分类' / '出预分类' / '复盘前准备' / '界定一下这些Bug'\n\n"
+                "⚠️ 与版本复盘的区别：\n"
+                "  Bug界定  = 复盘会前的预分类准备材料，判断Bug值不值得复盘\n"
+                "  版本复盘 = 复盘会上展示的正式文档（用 zentao_version_review 工具）\n"
+                "用户只说'复盘'时，必须先询问是要'版本复盘报告'还是'Bug界定预分类'。"
             ),
             inputSchema={
                 "type": "object",
@@ -477,12 +492,10 @@ async def _dispatch(name: str, args: dict[str, Any]) -> Any:
         version_id = args.get("version_id")
         log.info("工具调用：zentao_bug_review（project=%s，version=%s）", project_id, version_id or "auto")
 
-        # version_id 未传时，自动识别最近已交付版本
         if not version_id:
             versions = get_versions(_get_client(), project_id)
             prev = versions.get("prev")
             curr = versions.get("curr")
-            # 优先取上一版本（已交付），无上一版本时取当前版本
             target = prev or curr
             if not target:
                 raise RuntimeError("无法识别目标版本，请手动传入 version_id。")
