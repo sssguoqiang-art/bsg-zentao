@@ -12,6 +12,7 @@ Claude Code 通过这里调用所有工具。
 
   报告工具（复合）：用于生成固定格式报告
     - zentao_daily_report       生成并保存日报
+    - zentao_version_review     生成版本复盘数据包
     - zentao_save_report        保存 Claude 生成的报告内容到文件
 
   知识库工具（用户级）：管理个人 Profile 和 Memory
@@ -49,6 +50,7 @@ from bsg_zentao.user_knowledge import (
 )
 from tools.data_tools import get_versions, get_version_requirements, get_version_bugs
 from tools.report_tools import assemble_daily_report, save_daily_report
+from tools.report_tools_review import assemble_review_report, save_review_report
 
 # ─── 日志配置 ─────────────────────────────────────────────────────────────────
 
@@ -208,11 +210,56 @@ async def list_tools() -> list[types.Tool]:
                     },
                     "report_type": {
                         "type": "string",
-                        "description": "报告类型：daily（日报）。后续版本将支持 weekly、bug_review、version_review。",
-                        "enum": ["daily"],
+                        "description": "报告类型：daily（日报）、review（版本复盘）。",
+                        "enum": ["daily", "review"],
+                    },
+                    "version_name": {
+                        "type": "string",
+                        "description": "版本名称，report_type=review 时必传，如 'V2.11.0（0408）'。",
                     },
                 },
-                "required": ["content", "project_id", "report_type"],
+                "required": ["content", "report_type"],
+            },
+        ),
+
+        # ── 报告工具3：版本复盘 ────────────────────────────────────────────────
+        types.Tool(
+            name="zentao_version_review",
+            description=(
+                "生成版本复盘数据包，包含外部Bug复盘、内部Bug复盘、版本需求趋势等完整数据。\n"
+                "调用后由 Claude 根据数据包生成复盘报告 Markdown 文本，再调用 zentao_save_report 保存。\n\n"
+                "报告三段式结构：一、外部Bug复盘 → 二、内部Bug复盘 → 三、版本复盘\n\n"
+                "数据分类说明：\n"
+                "  A类（确定性）：直接填入，无需标注\n"
+                "  B类（需确认）：Claude 生成草稿并标注【待确认】\n"
+                "  C类（人工填写）：填入【待补充·人工】占位符\n\n"
+                "B类内容（Claude 需根据 deep_analysis 数据自行归纳）：\n"
+                "  1.6 外部Bug管理问题总结、各处趋势结论文字\n"
+                "  2.3 高缺陷Bug类型分析、内部Bug趋势概况\n"
+                "  2.5 低质量任务管理判断说明\n"
+                "  2.6 测试组不可容忍Bug类型总结"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_id": {
+                        "type": "string",
+                        "description": (
+                            f"项目 ID。可选值：{_project_choices()}。"
+                            "如果用户未指定，优先使用平台项目（10）。"
+                        ),
+                    },
+                    "version": {
+                        "type": "string",
+                        "description": (
+                            "目标版本。"
+                            "'auto' = 自动识别最近已交付版本（默认）。"
+                            "或填具体版本 ID，如 '394'。"
+                        ),
+                        "default": "auto",
+                    },
+                },
+                "required": ["project_id"],
             },
         ),
 
@@ -401,14 +448,25 @@ async def _dispatch(name: str, args: dict[str, Any]) -> Any:
         return assemble_daily_report(_get_client(), project_id)
 
     # ── 报告工具2：保存报告 ──────────────────────────────────────────────────
+    elif name == "zentao_version_review":
+        project_id = args["project_id"]
+        version    = args.get("version", "auto")
+        log.info("工具调用：zentao_version_review（project=%s，version=%s）", project_id, version)
+        return assemble_review_report(_get_client(), project_id, version)
+
     elif name == "zentao_save_report":
-        content     = args["content"]
-        project_id  = args["project_id"]
-        report_type = args.get("report_type", "daily")
+        content      = args["content"]
+        project_id   = args.get("project_id", "10")
+        report_type  = args.get("report_type", "daily")
+        version_name = args.get("version_name", "")
         log.info("工具调用：zentao_save_report（type=%s）", report_type)
 
         if report_type == "daily":
             path = save_daily_report(content, project_id)
+        elif report_type == "review":
+            if not version_name:
+                raise ValueError("report_type=review 时必须传 version_name 参数")
+            path = save_review_report(content, version_name)
         else:
             raise ValueError(f"暂不支持的报告类型：{report_type}")
 
