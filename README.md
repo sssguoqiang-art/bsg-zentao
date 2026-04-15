@@ -381,19 +381,30 @@ Bug界定一下
 
 工具缓存当天的接口数据，同一天重复提问不会重复请求禅道，响应更快。
 
+缓存文件保存在项目目录下，可直接查看：
+
+```
+bsg-zentao/缓存/
+└── 20260414_版本列表_undone.json
+└── 20260414_需求池_394.json
+└── 20260414_Bug数据_394.json
+```
+
 手动清除缓存（数据异常时使用）：
 
 **Mac：**
 
 ```bash
-rm -rf ~/.bsg-zentao/缓存/
+rm -rf ~/你的仓库路径/bsg-zentao/缓存/
 ```
 
 **Windows：**
 
 ```cmd
-rmdir /s /q %USERPROFILE%\.bsg-zentao\缓存
+rmdir /s /q 你的仓库路径\bsg-zentao\缓存
 ```
+
+> ⚠️ 缓存文件不进 git，.gitignore 已排除。
 
 ---
 

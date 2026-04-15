@@ -41,7 +41,7 @@ log = logging.getLogger(__name__)
 
 BASE_URL    = "https://cd.baa360.cc:20088/index.php"
 CONFIG_PATH = Path.home() / ".bsg-zentao" / "config.json"
-CACHE_DIR   = Path.home() / ".bsg-zentao" / "缓存"
+CACHE_DIR   = Path(__file__).parent.parent / "缓存"  # bsg-zentao/缓存/，用户可直接查看
 
 # 模拟浏览器请求头（禅道服务端会做校验）
 _HEADERS = {

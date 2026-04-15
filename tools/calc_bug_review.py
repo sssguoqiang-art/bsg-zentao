@@ -19,15 +19,11 @@ Bug 复盘预分类计算逻辑。
 import re
 from collections import Counter
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 
 from bsg_zentao.client import ZentaoClient
 from bsg_zentao.constants import DEPT_MAP
-
-# ─── 报告保存路径 ──────────────────────────────────────────────────────────────
-
-REPORT_DIR = Path.home() / ".bsg-zentao" / "报告" / "Bug界定"
+from bsg_zentao.utils import get_report_path
 
 # ─── URL 生成 ─────────────────────────────────────────────────────────────────
 
@@ -544,8 +540,7 @@ def calc_bug_review(client: ZentaoClient, version_id: str, project_id: str) -> d
 
 def save_bug_review_report(content: str, vname: str) -> str:
     """保存 Claude 生成的 MD 报告到本地，返回保存路径。"""
-    REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    m    = re.search(r"（(\d{4})）", vname)
-    path = REPORT_DIR / f"{vname} 复盘预分类报告.md"
+    filename = re.sub(r'[\\/:*?"<>|]', '', vname).strip()
+    path = get_report_path("Bug界定", f"{filename} 复盘预分类报告.md")
     path.write_text(content, encoding="utf-8")
     return str(path)
