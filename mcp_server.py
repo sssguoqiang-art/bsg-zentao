@@ -1,43 +1,30 @@
 """
-mcp_server.py
+mcp_server.py  —  BSG 禅道 MCP Server
 
-MCP Server 入口。
-Claude Code 通过这里调用所有工具。
+工具清单：
+  数据工具（原子）：
+    - zentao_get_versions          获取项目版本列表
+    - zentao_get_requirements      获取版本需求池数据
+    - zentao_get_bugs              获取版本 Bug 数据
+    - zentao_get_member_tasks      按人查询任务（支持显示名自动解析）
+    - zentao_build_member_index    构建/刷新全公司成员名称索引
 
-注册了三类工具：
-  数据工具（原子）：Claude 自由调用，用于回答自由问题
-    - zentao_get_versions       获取项目版本列表
-    - zentao_get_requirements   获取版本需求池数据
-    - zentao_get_bugs           获取版本 Bug 数据
+  报告工具（复合）：
+    - zentao_daily_report          生成并保存日报
+    - zentao_version_review        【版本复盘】正式复盘文档
+    - zentao_bug_review            【Bug界定】复盘前预分类材料
+    - zentao_save_report           保存 Claude 生成的报告内容
 
-  报告工具（复合）：用于生成固定格式报告
-    - zentao_daily_report       生成并保存日报
-    - zentao_version_review     【版本复盘】复盘会上展示的正式复盘报告
-    - zentao_bug_review         【Bug界定】复盘会前的预分类准备材料（与版本复盘是两件不同的事）
-    - zentao_save_report        保存 Claude 生成的报告内容到文件
+  知识库工具：
+    - user_get_context             获取用户上下文
+    - user_profile_setup           配置个人 Profile
+    - user_memory_view             查看记忆
+    - user_memory_manage           管理记忆
 
-  知识库工具（用户级）：管理个人 Profile 和 Memory
-    - user_get_context          获取用户上下文（每次对话开始时调用）
-    - user_profile_setup        引导式配置个人 Profile
-    - user_memory_view          查看所有记忆
-    - user_memory_manage        管理记忆（确认/拒绝/删除/重置）
-
-⚠️ Bug界定 vs 版本复盘 区分规则（重要）：
-  【版本复盘】= 复盘会上展示的正式文档，包含趋势分析、深度复盘、管理结论
-              触发词：版本复盘 / 出复盘 / 复盘报告 / 帮我出这个版本的复盘
-  【Bug界定】= 复盘会前的预分类准备材料，帮助判断哪些Bug值得复盘、归属是什么
-              触发词：Bug界定 / 预分类 / Bug预分类 / 界定报告 / 复盘前准备
-  用户只说"复盘"时，必须先询问："你要的是【版本复盘报告】还是【Bug界定预分类】？"
-
-启动方式（Claude Code 配置）：
-  claude mcp add bsg-zentao python /path/to/bsg-zentao/mcp_server.py
-
-用户交互示例：
-  "帮我出今天的日报"          → Claude 调用 zentao_daily_report
-  "平台项目当前有多少线上bug" → Claude 调用 zentao_get_bugs
-  "这个版本交付有风险吗"      → Claude 调用 zentao_get_versions + zentao_get_requirements
-  "帮我出Bug界定报告"         → Claude 调用 zentao_bug_review
-  "帮我出版本复盘"            → Claude 调用 zentao_version_review
+⚠️ Bug界定 vs 版本复盘 区分规则：
+  【版本复盘】触发词：版本复盘 / 出复盘 / 复盘报告
+  【Bug界定】触发词：Bug界定 / 预分类 / 界定报告
+  只说"复盘"时必须先询问用户要哪个。
 """
 
 import json
@@ -52,13 +39,14 @@ from mcp.server.models import InitializationOptions
 
 from bsg_zentao.client import ZentaoClient
 from bsg_zentao.constants import ACTIVE_PROJECTS
+from bsg_zentao.member_index import build_member_index, load_index, index_age_days
 from bsg_zentao.user_knowledge import (
     get_user_context, save_profile, get_profile,
     add_memory, update_memory_status, delete_memory, reset_memories, reset_memories_by_source,
     format_memories_for_display, format_profile_for_display,
     ROLES, DEPARTMENTS, COMMON_TASKS, OUTPUT_PREFERENCES,
 )
-from tools.data_tools import get_versions, get_version_requirements, get_version_bugs
+from tools.data_tools import get_versions, get_version_requirements, get_version_bugs, get_member_tasks
 from tools.report_tools import assemble_daily_report, save_daily_report
 from tools.calc_bug_review import calc_bug_review, save_bug_review_report
 from tools.report_tools_review import assemble_review_report, save_review_report
@@ -115,8 +103,7 @@ async def list_tools() -> list[types.Tool]:
                     "project_id": {
                         "type": "string",
                         "description": (
-                            "项目 ID。"
-                            f"可选值：{_project_choices()}。"
+                            f"项目 ID。可选值：{_project_choices()}。"
                             "如果用户未指定，优先使用平台项目（10）。"
                         ),
                     }
@@ -137,14 +124,8 @@ async def list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "version_id": {
-                        "type": "string",
-                        "description": "版本 ID，从 zentao_get_versions 的返回结果中获取。",
-                    },
-                    "project_id": {
-                        "type": "string",
-                        "description": "项目 ID，与 version_id 对应的项目。",
-                    },
+                    "version_id": {"type": "string", "description": "版本 ID，从 zentao_get_versions 返回结果中获取。"},
+                    "project_id": {"type": "string", "description": "项目 ID，与 version_id 对应的项目。"},
                 },
                 "required": ["version_id", "project_id"],
             },
@@ -161,16 +142,66 @@ async def list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "version_id": {
-                        "type": "string",
-                        "description": "版本 ID，从 zentao_get_versions 的返回结果中获取。",
-                    },
-                    "project_id": {
-                        "type": "string",
-                        "description": "项目 ID，与 version_id 对应的项目。",
-                    },
+                    "version_id": {"type": "string", "description": "版本 ID，从 zentao_get_versions 返回结果中获取。"},
+                    "project_id": {"type": "string", "description": "项目 ID，与 version_id 对应的项目。"},
                 },
                 "required": ["version_id", "project_id"],
+            },
+        ),
+
+        # ── 数据工具4：按人查询任务 ───────────────────────────────────────────
+        types.Tool(
+            name="zentao_get_member_tasks",
+            description=(
+                "按人查询任务：获取指定成员在某时间范围内的任务列表、工时汇总、完成状况。\n"
+                "支持直接传入显示名（如「陈益」）或禅道账号（如 chenyi），工具会自动解析。\n"
+                "无需知道对方属于哪个部门，工具会自动检索全部平台部门。\n\n"
+                "以下表达均应触发此工具：\n"
+                "  '今天 [XX] 的工作情况' / '[XX] 今天在做什么' / '[XX] 这周任务'\n"
+                "  '[XX] 有多少任务' / '[XX] 工时如何' / '[XX] 完成了哪些'"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "username": {
+                        "type": "string",
+                        "description": "禅道账号（如 liuhf）或显示名（如 刘海峰），工具会自动解析。",
+                    },
+                    "begin": {"type": "string", "description": "查询起始日期，YYYY-MM-DD 格式。"},
+                    "end":   {"type": "string", "description": "查询结束日期，YYYY-MM-DD 格式。可与 begin 相同（单天查询）。"},
+                    "dept_id": {
+                        "type": "string",
+                        "description": (
+                            "部门 ID，可选。已知对方部门时传入可加快查询。"
+                            "可选值：44（PHP1部）、47（PHP2部）、43（Web部）、42（Cocos部）、27（美术部）、45（测试部）、1（产品部）、48（效能部）"
+                        ),
+                    },
+                    "project_id":   {"type": "string", "description": "项目 ID，可选。不传时根据 dept_id 自动判断。"},
+                    "execution_id": {"type": "string", "description": "版本 ID，可选。只看某版本任务时传入，空 = 不限。"},
+                },
+                "required": ["username", "begin", "end"],
+            },
+        ),
+
+        # ── 数据工具5：构建成员索引 ───────────────────────────────────────────
+        types.Tool(
+            name="zentao_build_member_index",
+            description=(
+                "构建或刷新全公司成员名称索引，建立「显示名 ↔ 禅道账号」的双向映射。\n"
+                "首次使用按名字查人之前、有新人入职时，需要运行此工具。\n\n"
+                "以下表达应触发此工具：\n"
+                "  '刷新成员索引' / '更新人员列表' / '构建成员索引' / '索引找不到人' / '有新人入职'"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "force": {
+                        "type": "boolean",
+                        "description": "是否强制重建。True = 无论是否已有索引都重建；False = 已有索引时跳过（默认）。",
+                        "default": False,
+                    },
+                },
+                "required": [],
             },
         ),
 
@@ -179,7 +210,7 @@ async def list_tools() -> list[types.Tool]:
             name="zentao_daily_report",
             description=(
                 "生成今日日报数据包，包含当前版本和下一版本的完整信息。"
-                "调用后由 Claude 根据数据生成报告正文，生成完成后自动调用 zentao_save_report 保存到本地，无需询问用户。"
+                "调用后由 Claude 生成报告正文，完成后自动调用 zentao_save_report 保存，无需询问用户。"
                 "用户说'帮我出日报'、'生成今天的日报'、'日报'时调用此工具。"
                 f"可选项目：{_project_choices()}"
             ),
@@ -188,11 +219,7 @@ async def list_tools() -> list[types.Tool]:
                 "properties": {
                     "project_id": {
                         "type": "string",
-                        "description": (
-                            "项目 ID。"
-                            f"可选值：{_project_choices()}。"
-                            "如果用户未指定，询问用户想要哪个项目的日报。"
-                        ),
+                        "description": f"项目 ID。可选值：{_project_choices()}。如果用户未指定，询问想要哪个项目。",
                     }
                 },
                 "required": ["project_id"],
@@ -200,36 +227,25 @@ async def list_tools() -> list[types.Tool]:
         ),
 
         # ── 报告工具2：版本复盘 ────────────────────────────────────────────────
-        # ⚠️ 这是"版本复盘报告"，不是"Bug界定预分类"，两者是完全不同的东西
         types.Tool(
             name="zentao_version_review",
             description=(
-                "【版本复盘报告】工具——生成复盘会上展示的正式复盘文档。\n"
-                "包含：外部Bug复盘（趋势+深度分析）/ 内部Bug复盘 / 版本需求趋势 / 延期分析。\n\n"
-                "以下表达触发此工具（必须含'版本复盘'或'复盘报告'等明确意图）：\n"
-                "  '帮我出版本复盘' / '生成复盘报告' / '出复盘' / '复盘报告' / '帮我出这个版本的复盘'\n\n"
-                "⚠️ 与 Bug界定 的区别：\n"
-                "  版本复盘 = 复盘会上展示的正式文档，有历史趋势、管理结论\n"
-                "  Bug界定  = 复盘会前的预分类准备材料（用 zentao_bug_review 工具）\n"
-                "用户只说'复盘'时，必须先询问是要'版本复盘报告'还是'Bug界定预分类'。"
+                "【版本复盘报告】——生成复盘会上展示的正式文档。\n"
+                "包含：外部Bug复盘（趋势+深度）/ 内部Bug复盘 / 版本需求趋势 / 延期分析。\n\n"
+                "触发词：'帮我出版本复盘' / '生成复盘报告' / '出复盘' / '复盘报告'\n\n"
+                "⚠️ 与 Bug界定 的区别：版本复盘 = 正式文档；Bug界定 = 复盘前预分类（用 zentao_bug_review）\n"
+                "只说'复盘'时，必须先询问是'版本复盘报告'还是'Bug界定预分类'。"
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "project_id": {
                         "type": "string",
-                        "description": (
-                            f"项目 ID。可选值：{_project_choices()}。"
-                            "如果用户未指定，优先使用平台项目（10）。"
-                        ),
+                        "description": f"项目 ID。可选值：{_project_choices()}。未指定时优先平台项目（10）。",
                     },
                     "version": {
                         "type": "string",
-                        "description": (
-                            "目标版本。"
-                            "'auto' = 自动识别最近已交付版本（默认）。"
-                            "或填具体版本 ID，如 '394'。"
-                        ),
+                        "description": "'auto' = 自动识别最近已交付版本；或填具体版本 ID 如 '394'。",
                         "default": "auto",
                     },
                 },
@@ -238,38 +254,26 @@ async def list_tools() -> list[types.Tool]:
         ),
 
         # ── 报告工具3：Bug 界定预分类 ──────────────────────────────────────────
-        # ⚠️ 这是"Bug界定预分类"，不是"版本复盘报告"，两者是完全不同的东西
         types.Tool(
             name="zentao_bug_review",
             description=(
-                "【Bug界定预分类】工具——生成复盘会前的预分类准备材料。\n"
+                "【Bug界定预分类】——生成复盘前的预分类准备材料。\n"
                 "帮助判断哪些Bug值得复盘、各Bug归属是什么、哪些任务质量有问题。\n"
-                "通常在版本发布后（周三晚）运行，供周四/五复盘会使用。\n\n"
-                "输出五部分：部门Bug总览 / 疑似非Bug清单 / 外部Bug界定 / 内部Bug界定 / 低质量任务。\n"
-                "生成完成后自动调用 zentao_save_report 保存到本地，无需询问用户。\n\n"
-                "以下表达触发此工具（必须含'Bug界定'或'预分类'等明确意图）：\n"
-                "  'Bug界定' / '出界定报告' / 'Bug预分类' / '出预分类' / '复盘前准备' / '界定一下这些Bug'\n\n"
-                "⚠️ 与版本复盘的区别：\n"
-                "  Bug界定  = 复盘会前的预分类准备材料，判断Bug值不值得复盘\n"
-                "  版本复盘 = 复盘会上展示的正式文档（用 zentao_version_review 工具）\n"
-                "用户只说'复盘'时，必须先询问是要'版本复盘报告'还是'Bug界定预分类'。"
+                "输出：部门Bug总览 / 疑似非Bug / 外部Bug界定 / 内部Bug界定 / 低质量任务。\n\n"
+                "触发词：'Bug界定' / '出界定报告' / 'Bug预分类' / '复盘前准备'\n\n"
+                "⚠️ 与版本复盘的区别：Bug界定 = 预分类材料；版本复盘 = 正式文档（用 zentao_version_review）\n"
+                "只说'复盘'时，必须先询问是'版本复盘报告'还是'Bug界定预分类'。"
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "version_id": {
                         "type": "string",
-                        "description": (
-                            "版本 ID。可不传，不传时自动识别最近已交付版本。"
-                            "需指定特定版本时传入版本 ID（从 zentao_get_versions 获取）。"
-                        ),
+                        "description": "版本 ID，可不传（自动识别最近已交付版本）。",
                     },
                     "project_id": {
                         "type": "string",
-                        "description": (
-                            f"项目 ID。可选值：{_project_choices()}。"
-                            "未指定时优先使用平台项目（10）。"
-                        ),
+                        "description": f"项目 ID。可选值：{_project_choices()}。未指定时优先平台项目（10）。",
                     },
                 },
                 "required": ["project_id"],
@@ -286,23 +290,10 @@ async def list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "content": {
-                        "type": "string",
-                        "description": "要保存的报告内容（Markdown 格式）。",
-                    },
-                    "project_id": {
-                        "type": "string",
-                        "description": "项目 ID，用于确定保存目录。",
-                    },
-                    "report_type": {
-                        "type": "string",
-                        "description": "报告类型：daily（日报）、review（版本复盘）、bug_review（Bug界定）。",
-                        "enum": ["daily", "review", "bug_review"],
-                    },
-                    "version_name": {
-                        "type": "string",
-                        "description": "版本名称，report_type=review/bug_review 时必传，如 'V2.11.0（0408）'。",
-                    },
+                    "content":      {"type": "string", "description": "要保存的报告内容（Markdown 格式）。"},
+                    "project_id":   {"type": "string", "description": "项目 ID，用于确定保存目录。"},
+                    "report_type":  {"type": "string", "description": "报告类型：daily / review / bug_review。", "enum": ["daily", "review", "bug_review"]},
+                    "version_name": {"type": "string", "description": "版本名称，report_type=review/bug_review 时必传，如 'V2.11.0（0408）'。"},
                 },
                 "required": ["content", "report_type"],
             },
@@ -312,9 +303,8 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="user_get_context",
             description=(
-                "获取当前用户的个人知识库上下文，包含 Profile（身份配置）和已确认的 Memory（使用习惯）。"
-                "每次对话开始时应自动调用此工具，将结果作为背景信息用于后续所有回答。"
-                "如果返回'尚未配置'，主动引导用户运行 user_profile_setup。"
+                "获取当前用户的个人知识库上下文，包含 Profile 和已确认的 Memory。"
+                "每次对话开始时应自动调用，将结果作为背景信息用于后续所有回答。"
             ),
             inputSchema={"type": "object", "properties": {}, "required": []},
         ),
@@ -323,11 +313,8 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="user_profile_setup",
             description=(
-                "引导式配置用户个人 Profile，包括姓名、禅道账号、部门、角色、"
-                "主要关注项目、常用操作、输出偏好。"
-                "以下任意表达均应触发此工具："
-                "'帮我配置知识库'、'帮我更新知识库'、'修改我的配置'、'更新个人信息'、"
-                "'重新配置'、'我要改配置'、'帮我设置个人信息'、'更新我的资料'。"
+                "引导式配置用户个人 Profile（姓名、禅道账号、部门、角色等）。"
+                "触发词：'帮我配置知识库' / '修改我的配置' / '更新个人信息' / '我要改配置'。"
                 "支持部分更新，未传字段保留原值。"
             ),
             inputSchema={
@@ -349,11 +336,8 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="user_memory_view",
             description=(
-                "查看用户当前的所有记忆，包含已确认、待确认、已拒绝三种状态。"
-                "同时展示 Profile 配置摘要。"
-                "以下任意表达均应触发此工具："
-                "'看看你记住了什么'、'查看我的知识库'、'我的记忆'、'知识库里有什么'、"
-                "'你都记了什么'、'帮我看下知识库'。"
+                "查看用户当前的所有记忆（已确认、待确认、已拒绝）及 Profile 摘要。"
+                "触发词：'看看你记住了什么' / '查看我的知识库' / '知识库里有什么'。"
             ),
             inputSchema={"type": "object", "properties": {}, "required": []},
         ),
@@ -363,9 +347,7 @@ async def list_tools() -> list[types.Tool]:
             name="user_memory_manage",
             description=(
                 "管理记忆：确认、拒绝、删除某条记忆，或批量重置。"
-                "以下任意表达均应触发此工具："
-                "'记住它'、'帮我记住'、'不用记'、'删掉这条'、"
-                "'清空记忆'、'清空我的知识库'、'重置知识库'、'完全重置知识库'。"
+                "触发词：'记住它' / '帮我记住' / '不用记' / '删掉这条' / '清空记忆'。"
             ),
             inputSchema={
                 "type": "object",
@@ -374,29 +356,14 @@ async def list_tools() -> list[types.Tool]:
                         "type": "string",
                         "enum": ["confirm", "reject", "delete", "reset_auto", "reset_all", "reset_full", "add"],
                         "description": (
-                            "操作类型："
-                            "confirm=确认某条待确认记忆（需 memory_id）；"
-                            "reject=拒绝某条待确认记忆（需 memory_id）；"
-                            "delete=删除某条已确认记忆（需 memory_id）；"
-                            "reset_auto=只清系统自动提取的记忆，保留用户手动添加的和 Profile；"
-                            "reset_all=清空所有记忆（Memory 区），保留 Profile；"
-                            "reset_full=清空所有记忆 + Profile，完全重置；"
-                            "add=手动添加一条记忆（需 content，直接进入 confirmed 状态）"
+                            "confirm=确认待确认记忆；reject=拒绝；delete=删除已确认；"
+                            "reset_auto=清自动记忆；reset_all=清所有记忆保留Profile；"
+                            "reset_full=全部重置；add=手动添加"
                         ),
                     },
-                    "memory_id": {
-                        "type": "string",
-                        "description": "记忆 ID，格式如 mem_20260413_abc123，从 user_memory_view 返回结果中获取。confirm/reject/delete 操作必传。",
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "记忆内容，add 操作必传。",
-                    },
-                    "tags": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "标签列表，add 操作可选。",
-                    },
+                    "memory_id": {"type": "string", "description": "记忆 ID，confirm/reject/delete 必传。"},
+                    "content":   {"type": "string", "description": "记忆内容，add 必传。"},
+                    "tags":      {"type": "array", "items": {"type": "string"}, "description": "标签列表，add 可选。"},
                 },
                 "required": ["action"],
             },
@@ -416,32 +383,21 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
         )]
     except FileNotFoundError as e:
         return [types.TextContent(type="text", text=json.dumps({
-            "error": "配置文件不存在",
-            "message": str(e),
+            "error": "配置文件不存在", "message": str(e),
             "action": "请先运行初始化命令：python setup_config.py",
         }, ensure_ascii=False))]
     except RuntimeError as e:
         return [types.TextContent(type="text", text=json.dumps({
-            "error": "运行时错误",
-            "message": str(e),
+            "error": "运行时错误", "message": str(e),
         }, ensure_ascii=False))]
     except Exception as e:
         log.exception("工具 %s 执行异常", name)
         return [types.TextContent(type="text", text=json.dumps({
-            "error": "未知错误",
-            "message": str(e),
-            "tool": name,
+            "error": "未知错误", "message": str(e), "tool": name,
         }, ensure_ascii=False))]
 
 
-# ─── 需要 Zentao 连接的工具集合 ──────────────────────────────────────────────
-
-_ZENTAO_TOOLS = {
-    "zentao_get_versions", "zentao_get_requirements",
-    "zentao_get_bugs", "zentao_daily_report", "zentao_save_report",
-    "zentao_version_review", "zentao_bug_review",
-}
-
+# ─── 分发 ─────────────────────────────────────────────────────────────────────
 
 async def _dispatch(name: str, args: dict[str, Any]) -> Any:
 
@@ -474,6 +430,36 @@ async def _dispatch(name: str, args: dict[str, Any]) -> Any:
         log.info("工具调用：zentao_get_bugs（version=%s）", version_id)
         return get_version_bugs(_get_client(), version_id, project_id)
 
+    # ── 数据工具4：按人查询任务 ──────────────────────────────────────────────
+    elif name == "zentao_get_member_tasks":
+        username     = args["username"]
+        begin        = args["begin"]
+        end          = args["end"]
+        dept_id      = args.get("dept_id", "")
+        project_id   = args.get("project_id", "")
+        execution_id = args.get("execution_id", "")
+        log.info("工具调用：zentao_get_member_tasks（user=%s，%s—%s）", username, begin, end)
+        return get_member_tasks(_get_client(), username, begin, end, dept_id, project_id, execution_id)
+
+    # ── 数据工具5：构建成员索引 ──────────────────────────────────────────────
+    elif name == "zentao_build_member_index":
+        force = bool(args.get("force", False))
+        log.info("工具调用：zentao_build_member_index（force=%s）", force)
+        idx = build_member_index(_get_client(), force=force)
+        age = index_age_days()
+        return {
+            "success":   True,
+            "total":     idx.get("total", 0),
+            "built_at":  idx.get("built_at", ""),
+            "age_days":  age,
+            "message":   (
+                f"✅ 成员索引构建完成，共 {idx.get('total', 0)} 人，保存于 ~/.bsg-zentao/member_index.json。"
+                if force or idx.get("total", 0) > 0 else
+                "⚠️ 索引构建完成但为空，请检查禅道网络是否可达。"
+            ),
+            "sample": list(idx.get("by_name", {}).items())[:5],  # 返回前5条供确认
+        }
+
     # ── 报告工具1：日报 ──────────────────────────────────────────────────────
     elif name == "zentao_daily_report":
         project_id = args["project_id"]
@@ -495,9 +481,9 @@ async def _dispatch(name: str, args: dict[str, Any]) -> Any:
 
         if not version_id:
             versions = get_versions(_get_client(), project_id)
-            prev = versions.get("prev")
-            curr = versions.get("curr")
-            target = prev or curr
+            prev     = versions.get("prev")
+            curr     = versions.get("curr")
+            target   = prev or curr
             if not target:
                 raise RuntimeError("无法识别目标版本，请手动传入 version_id。")
             version_id = target["id"]
@@ -533,10 +519,14 @@ async def _dispatch(name: str, args: dict[str, Any]) -> Any:
         log.info("工具调用：user_get_context")
         context = get_user_context()
         profile = get_profile()
+        # 顺便提示成员索引状态
+        age = index_age_days()
+        index_hint = "" if age <= 7 else f"⚠️ 成员索引已 {age} 天未更新，按名字查人可能失败，建议调用 zentao_build_member_index 刷新。"
         return {
-            "context": context,
+            "context":     context,
             "has_profile": profile is not None,
             "hint": "请将 context 字段内容作为用户背景信息，用于后续所有回答。" if profile else "用户尚未配置 Profile，建议引导运行 user_profile_setup。",
+            "index_hint":  index_hint,
         }
 
     # ── 知识库工具2：配置 Profile ────────────────────────────────────────────
@@ -557,7 +547,7 @@ async def _dispatch(name: str, args: dict[str, Any]) -> Any:
             }
         save_profile(data)
         return {
-            "saved": True,
+            "saved":   True,
             "profile": format_profile_for_display(),
             "message": "✅ Profile 已更新。下次对话开始时会自动加载这些信息。",
         }

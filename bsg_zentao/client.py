@@ -440,3 +440,63 @@ class ZentaoClient:
             return {"bugs": all_bugs, "stat": stat, "deptReview": dept_review}
 
         return self._fetch_with_fallback(cache_name, _fetch)
+
+    # ── 接口4：人员任务汇总（report/workassignsummary）─────────────────────────
+
+    def fetch_workassign(
+        self,
+        dept: str,
+        project: str,
+        begin: str,
+        end: str,
+        user: str = "",
+        execution: str = "",
+        show_done: int = 1,
+    ) -> dict:
+        """
+        获取指定部门的人员任务汇总。
+
+        参数说明（已实测确认）：
+          dept          → 部门 ID，如 "44"（PHP1部）
+          project       → 项目 ID，平台项目="10"，游戏项目="51"
+          begin/end     → 日期范围，格式 YYYY-MM-DD
+          user          → 禁道账号，空 = 查该部门所有人，指定 = 只返回该用户数据
+          execution     → 版本 ID，空 = 不限版本
+          show_done     → 1=包含已完成任务，0=仅未完成
+
+        返回数据关键字段：
+          taskUsers     → {username: {count, estimate, consumed, done_estimate, done_consumed, task: [...]}}
+          users         → 按组分类的用户列表，结构与 pool/browse 相同
+          workTimes     → {username: {day_num: hours}}—按天工时
+          noTaskUsers   → [username, ...]—本期无任务的人员
+        """
+        user_part = user if user else "all"
+        cache_name = f"人员任务_{dept}_{user_part}_{begin}_{end}"
+        log.info("拉取人员任务（dept=%s，user=%s，%s—%s）…", dept, user or "全部", begin, end)
+
+        def _fetch():
+            return self._get(
+                params={
+                    "m": "report", "f": "workassignsummary",
+                    "dept": dept,
+                    "user": user,
+                    "begin": begin,
+                    "end": end,
+                    "project": project,
+                    "execution": execution,
+                    "showDone": str(show_done),
+                    "onlyShowDone": "0",
+                    "showResolveBug": "0",
+                    "onlyShowResolveBug": "0",
+                    "onlyShowMain": "0",
+                    "isSelfTest": "",
+                    "tabId": "taskTab",
+                    "quickDate": "",
+                    "functionId": "",
+                    "group_id": "0",
+                    "t": "html", "getData": "1",
+                },
+                label=f"人员任务_{dept}_{user_part}",
+            )
+
+        return self._fetch_with_fallback(cache_name, _fetch)

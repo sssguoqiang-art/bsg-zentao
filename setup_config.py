@@ -24,6 +24,7 @@ import urllib3
 # 引入知识库模块（Profile 配置）
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bsg_zentao.user_knowledge import save_profile, get_profile, ROLES, DEPARTMENTS, COMMON_TASKS, OUTPUT_PREFERENCES
+from bsg_zentao.member_index import build_member_index, INDEX_PATH
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -124,6 +125,9 @@ def main():
     # 第二步：引导配置个人知识库 Profile
     _setup_profile(account)
 
+    # 第二步：自动构建成员索引
+    _build_index(account, password)
+
     _print_mcp_command()
 
 
@@ -216,6 +220,38 @@ def _setup_profile(zentao_account: str):
     if data.get("name"):
         print(f"  你好，{data['name']}！系统已记住你的信息。")
     print("════════════════════════════════════")
+    print()
+
+
+def _build_index(account: str, password: str):
+    """登录禁道并自动构建成员名称索引。"""
+    print()
+    print("════════════════════════════════════")
+    print("  第三步：构建成员索引")
+    print("════════════════════════════════════")
+    print()
+    print("正在构建「显示名 ↔ 禁道账号」双向索引…")
+    print("（索引建好后，可用显示名直接按人查询，无需记禁道账号）")
+    print()
+
+    try:
+        # 临时创建客户端（重用已验证成功的登录凭证）
+        from bsg_zentao.client import ZentaoClient
+        client = ZentaoClient()
+        idx = build_member_index(client, force=True)
+        total = idx.get("total", 0)
+        print(f"  ✅ 成员索引构建完成！共收录 {total} 人。")
+        print(f"  索引保存于：{INDEX_PATH}")
+        # 展示前幾条样本让用户确认
+        sample = list(idx.get("by_name", {}).items())[:5]
+        if sample:
+            print()
+            print("  样本条目（前5条）：")
+            for name, info in sample:
+                print(f"    {name} → {info['username']}  [{info['dept_name']}]")
+    except Exception as e:
+        print(f"  ⚠️  成员索引构建失败：{e}")
+        print("  不影响其它功能。可在 Claude Code 中说'刷新成员索引'重试。")
     print()
 
 
