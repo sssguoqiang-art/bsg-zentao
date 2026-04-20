@@ -342,7 +342,12 @@ def _classify_lq_root_cause(bugs: list, non_perf_bugs: dict) -> tuple[str, list[
 
 # ─── 主分析函数 ───────────────────────────────────────────────────────────────
 
-def calc_bug_review(client: ZentaoClient, version_id: str, project_id: str) -> dict:
+def calc_bug_review(
+    client: ZentaoClient,
+    version_id: str,
+    project_id: str,
+    force_refresh: bool = False,
+) -> dict:
     """
     返回结构：
     {
@@ -361,7 +366,7 @@ def calc_bug_review(client: ZentaoClient, version_id: str, project_id: str) -> d
         total_raw, non_bug_cnt, ext_total, int_total, int_other
     }
     """
-    raw         = client.fetch_bugs(version_id, project_id)
+    raw         = client.fetch_bugs(version_id, project_id, force_refresh=force_refresh)
     bugs        = raw.get("bugs", [])
     dept_review = raw.get("deptReview", {})
     vname       = raw.get("versionName", f"版本{version_id}")

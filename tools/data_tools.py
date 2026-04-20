@@ -145,9 +145,9 @@ def _slim_task_details(task_details: dict) -> dict:
 
 # ─── 对外函数1：版本信息 ──────────────────────────────────────────────────────
 
-def get_versions(client: ZentaoClient, project_id: str) -> dict:
+def get_versions(client: ZentaoClient, project_id: str, force_refresh: bool = False) -> dict:
     today = date.today()
-    data  = client.fetch_versions(status="undone")
+    data  = client.fetch_versions(status="undone", force_refresh=force_refresh)
     execs = data.get("executionStats", [])
     result = _identify_versions(execs, project_id, today)
     result["project_id"] = project_id
@@ -160,8 +160,9 @@ def get_version_requirements(
     client: ZentaoClient,
     version_id: str,
     project_id: str,
+    force_refresh: bool = False,
 ) -> dict:
-    raw = client.fetch_pool(version_id, project_id)
+    raw = client.fetch_pool(version_id, project_id, force_refresh=force_refresh)
     pools_raw      = raw.get("pools", [])
     task_details   = raw.get("taskDetails", {})
     pms            = raw.get("pms", {})
@@ -192,8 +193,9 @@ def get_version_bugs(
     client: ZentaoClient,
     version_id: str,
     project_id: str,
+    force_refresh: bool = False,
 ) -> dict:
-    raw = client.fetch_bugs(version_id, project_id)
+    raw = client.fetch_bugs(version_id, project_id, force_refresh=force_refresh)
     slim_bugs = [
         _slim_bug(b)
         for b in raw.get("bugs", [])
@@ -232,12 +234,13 @@ def get_version_history(
     current_vid: str,
     project_id: str,
     max_count: int = 4,
+    force_refresh: bool = False,
 ) -> list[dict]:
     import re as _re
     INVALID_NAMES = {"W5", "平台组"}
 
-    undone_data = client.fetch_versions(status="undone")
-    closed_data = client.fetch_versions(status="closed")
+    undone_data = client.fetch_versions(status="undone", force_refresh=force_refresh)
+    closed_data = client.fetch_versions(status="closed", force_refresh=force_refresh)
     all_execs   = (
         undone_data.get("executionStats", [])
         + closed_data.get("executionStats", [])
@@ -271,7 +274,7 @@ def get_version_history(
         vid_str = str(vid_int)
         vname   = id_to_name.get(vid_str, vid_str)
 
-        bug_result  = get_version_bugs(client, vid_str, project_id)
+        bug_result  = get_version_bugs(client, vid_str, project_id, force_refresh=force_refresh)
         bugs        = bug_result["bugs"]
         stat        = bug_result["stat"]
         dept_review = bug_result["dept_review"]
@@ -293,7 +296,7 @@ def get_version_history(
                 if 45 in (dr.get("depts") or []) or "45" in [str(d) for d in (dr.get("depts") or [])]:
                     test_dept_count += 1
 
-        pool_result  = get_version_requirements(client, vid_str, project_id)
+        pool_result  = get_version_requirements(client, vid_str, project_id, force_refresh=force_refresh)
         active_pools = [p for p in pool_result["pools"] if p.get("task_status") != "cancel"]
         ext_reqs = sum(1 for p in active_pools if p.get("category") in ("version", "operation"))
         int_reqs = sum(1 for p in active_pools if p.get("category") == "internal")
@@ -322,6 +325,7 @@ def get_member_tasks(
     dept_id: str = "",
     project_id: str = "",
     execution_id: str = "",
+    force_refresh: bool = False,
 ) -> dict:
     """
     按人查询任务详情。
@@ -403,6 +407,7 @@ def get_member_tasks(
             begin=begin, end=end,
             user=resolved_username,
             execution=execution_id or "",
+            force_refresh=force_refresh,
         )
 
         task_users = raw.get("taskUsers", {})

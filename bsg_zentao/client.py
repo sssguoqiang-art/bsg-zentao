@@ -4,13 +4,14 @@ bsg_zentao/client.py
 负责三件事：
   1. 从配置文件读取账号密码，登录禅道，拿到访问令牌
   2. 封装所有对禅道接口的请求（自动重试、自动解析 JSON）
-  3. 离线降级：有网络时永远拉实时数据；网络不通时自动降级到当天缓存
+  3. 提供短 TTL 缓存 + 离线降级，兼顾速度和实时性
 
-缓存策略（v2）：
-  - 有网络：每次实时拉取，拉取成功后覆盖写入当天缓存
-  - 无网络：自动降级读当天缓存，用户无感知
+缓存策略（v3）：
+  - 在线：优先命中短 TTL 缓存（进程内 L1，其次本地磁盘 L2）
+  - 在线且缓存过期：重新拉取禅道实时数据，并刷新缓存
+  - 离线：自动降级读当天缓存，用户无感知
   - 无网络且无当天缓存：抛出明确错误提示用户
-  - 缓存不再用于「去重请求」，只用于「离线降级」
+  - 支持 force_refresh=True 强制跳过缓存
 
 外部使用方式：
     from bsg_zentao.client import ZentaoClient
@@ -27,7 +28,7 @@ import re
 import time
 from datetime import date
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import requests
 import urllib3
@@ -51,6 +52,15 @@ _HEADERS = {
     "User-Agent":       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                         "AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
     "X-Requested-With": "XMLHttpRequest",
+}
+
+_CACHE_SCHEMA = 1
+_CACHE_TTL_DEFAULT = 60
+_CACHE_TTLS = {
+    "版本列表_": 120,
+    "需求池_": 60,
+    "Bug数据_": 30,
+    "人员任务_": 60,
 }
 
 
@@ -125,26 +135,65 @@ def _is_network_available() -> bool:
 # ─── 缓存（离线降级专用）────────────────────────────────────────────────────
 
 def _cache_path(name: str) -> Path:
-    """生成缓存路径，格式：~/.bsg-zentao/缓存/20260409_名称.json"""
+    """生成缓存路径，格式：bsg-zentao/缓存/20260409_名称.json"""
     today = date.today().strftime("%Y%m%d")
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     return CACHE_DIR / f"{today}_{name}.json"
 
 
-def _load_cache(name: str) -> Optional[dict | list]:
-    """读取当天缓存，不存在则返回 None。仅用于离线降级。"""
+def _ttl_for_cache(name: str) -> int:
+    for prefix, ttl in _CACHE_TTLS.items():
+        if name.startswith(prefix):
+            return ttl
+    return _CACHE_TTL_DEFAULT
+
+
+def _cache_envelope(name: str, data: dict | list) -> dict:
+    return {
+        "_meta": {
+            "schema": _CACHE_SCHEMA,
+            "name": name,
+            "cached_at": time.time(),
+        },
+        "data": data,
+    }
+
+
+def _read_cache_entry(name: str) -> tuple[Optional[dict | list], Optional[float]]:
     path = _cache_path(name)
-    if path.exists():
-        log.info("  离线降级：使用当天缓存 %s", path.name)
-        return json.loads(path.read_text(encoding="utf-8"))
-    return None
+    if not path.exists():
+        return None, None
+
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(raw, dict) and "_meta" in raw and "data" in raw:
+        meta = raw.get("_meta") or {}
+        cached_at = meta.get("cached_at")
+        return raw["data"], float(cached_at) if cached_at else None
+
+    # 兼容旧版只写原始数据的缓存文件
+    return raw, None
+
+
+def _load_cache(name: str, *, log_prefix: str) -> Optional[dict | list]:
+    """读取当天缓存，不存在则返回 None。"""
+    data, _ = _read_cache_entry(name)
+    if data is not None:
+        log.info("  %s%s", log_prefix, _cache_path(name).name)
+    return data
 
 
 def _save_cache(name: str, data: dict | list) -> None:
-    """写入当天缓存（每次实时拉取成功后覆盖写入，供离线时降级使用）。"""
+    """写入当天缓存（包含缓存时间元数据）。"""
     path = _cache_path(name)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    payload = _cache_envelope(name, data)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     log.debug("  已更新缓存：%s", path.name)
+
+
+def _is_cache_fresh(cached_at: Optional[float], ttl_seconds: int) -> bool:
+    if not cached_at:
+        return False
+    return (time.time() - cached_at) <= ttl_seconds
 
 
 # ─── 主类 ─────────────────────────────────────────────────────────────────────
@@ -160,28 +209,70 @@ class ZentaoClient:
         self._account  = config["account"]
         self._password = config["password"]
         self._online   = _is_network_available()
+        self._memory_cache: dict[str, tuple[float, dict | list]] = {}
         if self._online:
             self._session = self._login()
         else:
             self._session = None
             log.warning("禅道网络不可达，将使用当天本地缓存（只读模式）")
 
-    def _fetch_with_fallback(self, name: str, fetch_fn) -> dict | list:
+    def _get_memory_cache(self, name: str, ttl_seconds: int) -> Optional[dict | list]:
+        hit = self._memory_cache.get(name)
+        if not hit:
+            return None
+        cached_at, data = hit
+        if _is_cache_fresh(cached_at, ttl_seconds):
+            log.info("  进程缓存命中：%s", name)
+            return data
+        self._memory_cache.pop(name, None)
+        return None
+
+    def _remember(self, name: str, data: dict | list) -> None:
+        self._memory_cache[name] = (time.time(), data)
+
+    def _load_fresh_disk_cache(self, name: str, ttl_seconds: int) -> Optional[dict | list]:
+        data, cached_at = _read_cache_entry(name)
+        if data is None or not _is_cache_fresh(cached_at, ttl_seconds):
+            return None
+        log.info("  短 TTL 磁盘缓存命中：%s", _cache_path(name).name)
+        return data
+
+    def _fetch_with_fallback(
+        self,
+        name: str,
+        fetch_fn,
+        *,
+        ttl_seconds: int,
+        force_refresh: bool = False,
+    ) -> dict | list:
         """
-        核心调度方法：有网络走实时，无网络降级缓存。
+        核心调度方法：优先短 TTL 缓存；无网络或实时请求失败时降级到当天磁盘缓存。
 
         name     : 缓存键名（用于读写缓存文件）
         fetch_fn : 无参可调用对象，执行实际网络请求并返回数据
         """
+        if not force_refresh:
+            data = self._get_memory_cache(name, ttl_seconds)
+            if data is not None:
+                return data
+
+            if self._online:
+                data = self._load_fresh_disk_cache(name, ttl_seconds)
+                if data is not None:
+                    self._remember(name, data)
+                    return data
+
         if self._online:
             try:
                 data = fetch_fn()
-                _save_cache(name, data)   # 实时拉取成功，覆盖更新缓存
+                self._remember(name, data)
+                _save_cache(name, data)
                 return data
-            except requests.RequestException as e:
+            except (requests.RequestException, ValueError, json.JSONDecodeError) as e:
                 log.warning("网络请求失败，尝试降级到本地缓存：%s", e)
-                cached = _load_cache(name)
+                cached = _load_cache(name, log_prefix="降级使用当天缓存：")
                 if cached is not None:
+                    self._remember(name, cached)
                     return cached
                 raise RuntimeError(
                     f"禅道请求失败且无本地缓存可用（{name}）。\n"
@@ -189,8 +280,9 @@ class ZentaoClient:
                 ) from e
         else:
             # 离线模式：直接读缓存
-            cached = _load_cache(name)
+            cached = _load_cache(name, log_prefix="离线降级：使用当天缓存 ")
             if cached is not None:
+                self._remember(name, cached)
                 return cached
             raise RuntimeError(
                 f"当前无法访问禅道（网络不通），且本地没有今天的缓存数据（{name}）。\n"
@@ -287,7 +379,7 @@ class ZentaoClient:
 
     # ── 接口1：版本列表（execution/all）─────────────────────────────────────
 
-    def fetch_versions(self, status: str = "undone") -> dict:
+    def fetch_versions(self, status: str = "undone", force_refresh: bool = False) -> dict:
         """
         获取版本列表。
 
@@ -318,11 +410,13 @@ class ZentaoClient:
                 label="版本列表",
             )
 
-        return self._fetch_with_fallback(cache_name, _fetch)
+        return self._fetch_with_fallback(
+            cache_name, _fetch, ttl_seconds=_ttl_for_cache(cache_name), force_refresh=force_refresh
+        )
 
     # ── 接口2：需求池（pool/browse）─────────────────────────────────────────
 
-    def fetch_pool(self, version_id: str, project_id: str) -> dict:
+    def fetch_pool(self, version_id: str, project_id: str, force_refresh: bool = False) -> dict:
         """
         获取指定版本的需求池数据。
 
@@ -368,11 +462,13 @@ class ZentaoClient:
                 extra_headers={"Referer": referer},
             )
 
-        return self._fetch_with_fallback(cache_name, _fetch)
+        return self._fetch_with_fallback(
+            cache_name, _fetch, ttl_seconds=_ttl_for_cache(cache_name), force_refresh=force_refresh
+        )
 
     # ── 接口3：Bug 数据（report/onlinebug）───────────────────────────────────
 
-    def fetch_bugs(self, version_id: str, project_id: str) -> dict:
+    def fetch_bugs(self, version_id: str, project_id: str, force_refresh: bool = False) -> dict:
         """
         获取指定版本的全量 Bug 数据，自动处理分页。
 
@@ -439,7 +535,9 @@ class ZentaoClient:
 
             return {"bugs": all_bugs, "stat": stat, "deptReview": dept_review}
 
-        return self._fetch_with_fallback(cache_name, _fetch)
+        return self._fetch_with_fallback(
+            cache_name, _fetch, ttl_seconds=_ttl_for_cache(cache_name), force_refresh=force_refresh
+        )
 
     # ── 接口4：人员任务汇总（report/workassignsummary）─────────────────────────
 
@@ -452,6 +550,7 @@ class ZentaoClient:
         user: str = "",
         execution: str = "",
         show_done: int = 1,
+        force_refresh: bool = False,
     ) -> dict:
         """
         获取指定部门的人员任务汇总。
@@ -499,4 +598,7 @@ class ZentaoClient:
                 label=f"人员任务_{dept}_{user_part}",
             )
 
-        return self._fetch_with_fallback(cache_name, _fetch)
+        ttl_seconds = 60 if begin <= date.today().isoformat() <= end else 600
+        return self._fetch_with_fallback(
+            cache_name, _fetch, ttl_seconds=ttl_seconds, force_refresh=force_refresh
+        )

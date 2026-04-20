@@ -95,6 +95,7 @@ async def list_tools() -> list[types.Tool]:
             description=(
                 "获取禅道项目的版本信息，包括当前版本、下一版本、上一版本。"
                 "用于回答：'这个版本还有几天发布'、'当前版本是哪个'、'是否今天发布'等问题。"
+                "用户明确说'刷新一下'、'拉最新'时，传 force_refresh=true。"
                 f"可选项目：{_project_choices()}"
             ),
             inputSchema={
@@ -106,7 +107,12 @@ async def list_tools() -> list[types.Tool]:
                             f"项目 ID。可选值：{_project_choices()}。"
                             "如果用户未指定，优先使用平台项目（10）。"
                         ),
-                    }
+                    },
+                    "force_refresh": {
+                        "type": "boolean",
+                        "description": "是否强制跳过短 TTL 缓存，直接拉取最新数据。用户说'刷新一下'、'拉最新'时传 true。",
+                        "default": False,
+                    },
                 },
                 "required": ["project_id"],
             },
@@ -120,12 +126,18 @@ async def list_tools() -> list[types.Tool]:
                 "延期情况、未下单需求、驳回记录等。"
                 "用于回答：'这个版本任务量大吗'、'哪些需求还没下单'、"
                 "'有没有延期风险'、'驳回记录怎么样'等问题。"
+                "用户明确说'刷新一下'、'拉最新'时，传 force_refresh=true。"
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "version_id": {"type": "string", "description": "版本 ID，从 zentao_get_versions 返回结果中获取。"},
                     "project_id": {"type": "string", "description": "项目 ID，与 version_id 对应的项目。"},
+                    "force_refresh": {
+                        "type": "boolean",
+                        "description": "是否强制跳过短 TTL 缓存，直接拉取最新数据。",
+                        "default": False,
+                    },
                 },
                 "required": ["version_id", "project_id"],
             },
@@ -138,12 +150,18 @@ async def list_tools() -> list[types.Tool]:
                 "获取指定版本的 Bug 数据，包含线上 Bug 列表和统计摘要。"
                 "用于回答：'线上有多少个 Bug'、'有没有高危 Bug'、"
                 "'测试质量怎么样'、'Bug 分布在哪些需求上'等问题。"
+                "用户明确说'刷新一下'、'拉最新'时，传 force_refresh=true。"
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "version_id": {"type": "string", "description": "版本 ID，从 zentao_get_versions 返回结果中获取。"},
                     "project_id": {"type": "string", "description": "项目 ID，与 version_id 对应的项目。"},
+                    "force_refresh": {
+                        "type": "boolean",
+                        "description": "是否强制跳过短 TTL 缓存，直接拉取最新数据。",
+                        "default": False,
+                    },
                 },
                 "required": ["version_id", "project_id"],
             },
@@ -178,6 +196,11 @@ async def list_tools() -> list[types.Tool]:
                     },
                     "project_id":   {"type": "string", "description": "项目 ID，可选。不传时根据 dept_id 自动判断。"},
                     "execution_id": {"type": "string", "description": "版本 ID，可选。只看某版本任务时传入，空 = 不限。"},
+                    "force_refresh": {
+                        "type": "boolean",
+                        "description": "是否强制跳过短 TTL 缓存，直接拉取最新数据。",
+                        "default": False,
+                    },
                 },
                 "required": ["username", "begin", "end"],
             },
@@ -212,6 +235,7 @@ async def list_tools() -> list[types.Tool]:
                 "生成今日日报数据包，包含当前版本和下一版本的完整信息。"
                 "调用后由 Claude 生成报告正文，完成后自动调用 zentao_save_report 保存，无需询问用户。"
                 "用户说'帮我出日报'、'生成今天的日报'、'日报'时调用此工具。"
+                "用户明确说'刷新一下'、'拉最新日报'时，传 force_refresh=true。"
                 f"可选项目：{_project_choices()}"
             ),
             inputSchema={
@@ -220,7 +244,12 @@ async def list_tools() -> list[types.Tool]:
                     "project_id": {
                         "type": "string",
                         "description": f"项目 ID。可选值：{_project_choices()}。如果用户未指定，询问想要哪个项目。",
-                    }
+                    },
+                    "force_refresh": {
+                        "type": "boolean",
+                        "description": "是否强制跳过短 TTL 缓存，直接拉取最新数据。",
+                        "default": False,
+                    },
                 },
                 "required": ["project_id"],
             },
@@ -235,6 +264,7 @@ async def list_tools() -> list[types.Tool]:
                 "触发词：'帮我出版本复盘' / '生成复盘报告' / '出复盘' / '复盘报告'\n\n"
                 "⚠️ 与 Bug界定 的区别：版本复盘 = 正式文档；Bug界定 = 复盘前预分类（用 zentao_bug_review）\n"
                 "只说'复盘'时，必须先询问是'版本复盘报告'还是'Bug界定预分类'。"
+                "用户明确说'刷新一下'、'拉最新'时，传 force_refresh=true。"
             ),
             inputSchema={
                 "type": "object",
@@ -247,6 +277,11 @@ async def list_tools() -> list[types.Tool]:
                         "type": "string",
                         "description": "'auto' = 自动识别最近已交付版本；或填具体版本 ID 如 '394'。",
                         "default": "auto",
+                    },
+                    "force_refresh": {
+                        "type": "boolean",
+                        "description": "是否强制跳过短 TTL 缓存，直接拉取最新数据。",
+                        "default": False,
                     },
                 },
                 "required": ["project_id"],
@@ -263,6 +298,7 @@ async def list_tools() -> list[types.Tool]:
                 "触发词：'Bug界定' / '出界定报告' / 'Bug预分类' / '复盘前准备'\n\n"
                 "⚠️ 与版本复盘的区别：Bug界定 = 预分类材料；版本复盘 = 正式文档（用 zentao_version_review）\n"
                 "只说'复盘'时，必须先询问是'版本复盘报告'还是'Bug界定预分类'。"
+                "用户明确说'刷新一下'、'拉最新'时，传 force_refresh=true。"
             ),
             inputSchema={
                 "type": "object",
@@ -274,6 +310,11 @@ async def list_tools() -> list[types.Tool]:
                     "project_id": {
                         "type": "string",
                         "description": f"项目 ID。可选值：{_project_choices()}。未指定时优先平台项目（10）。",
+                    },
+                    "force_refresh": {
+                        "type": "boolean",
+                        "description": "是否强制跳过短 TTL 缓存，直接拉取最新数据。",
+                        "default": False,
                     },
                 },
                 "required": ["project_id"],
@@ -404,15 +445,17 @@ async def _dispatch(name: str, args: dict[str, Any]) -> Any:
     # ── 数据工具1：版本列表 ──────────────────────────────────────────────────
     if name == "zentao_get_versions":
         project_id = args["project_id"]
-        log.info("工具调用：zentao_get_versions（project=%s）", project_id)
-        return get_versions(_get_client(), project_id)
+        force_refresh = bool(args.get("force_refresh", False))
+        log.info("工具调用：zentao_get_versions（project=%s，refresh=%s）", project_id, force_refresh)
+        return get_versions(_get_client(), project_id, force_refresh=force_refresh)
 
     # ── 数据工具2：需求池 ────────────────────────────────────────────────────
     elif name == "zentao_get_requirements":
         version_id = args["version_id"]
         project_id = args["project_id"]
-        log.info("工具调用：zentao_get_requirements（version=%s）", version_id)
-        data = get_version_requirements(_get_client(), version_id, project_id)
+        force_refresh = bool(args.get("force_refresh", False))
+        log.info("工具调用：zentao_get_requirements（version=%s，refresh=%s）", version_id, force_refresh)
+        data = get_version_requirements(_get_client(), version_id, project_id, force_refresh=force_refresh)
         return {
             "version_id":        data["version_id"],
             "project_id":        data["project_id"],
@@ -427,8 +470,9 @@ async def _dispatch(name: str, args: dict[str, Any]) -> Any:
     elif name == "zentao_get_bugs":
         version_id = args["version_id"]
         project_id = args["project_id"]
-        log.info("工具调用：zentao_get_bugs（version=%s）", version_id)
-        return get_version_bugs(_get_client(), version_id, project_id)
+        force_refresh = bool(args.get("force_refresh", False))
+        log.info("工具调用：zentao_get_bugs（version=%s，refresh=%s）", version_id, force_refresh)
+        return get_version_bugs(_get_client(), version_id, project_id, force_refresh=force_refresh)
 
     # ── 数据工具4：按人查询任务 ──────────────────────────────────────────────
     elif name == "zentao_get_member_tasks":
@@ -438,8 +482,9 @@ async def _dispatch(name: str, args: dict[str, Any]) -> Any:
         dept_id      = args.get("dept_id", "")
         project_id   = args.get("project_id", "")
         execution_id = args.get("execution_id", "")
-        log.info("工具调用：zentao_get_member_tasks（user=%s，%s—%s）", username, begin, end)
-        return get_member_tasks(_get_client(), username, begin, end, dept_id, project_id, execution_id)
+        force_refresh = bool(args.get("force_refresh", False))
+        log.info("工具调用：zentao_get_member_tasks（user=%s，%s—%s，refresh=%s）", username, begin, end, force_refresh)
+        return get_member_tasks(_get_client(), username, begin, end, dept_id, project_id, execution_id, force_refresh=force_refresh)
 
     # ── 数据工具5：构建成员索引 ──────────────────────────────────────────────
     elif name == "zentao_build_member_index":
@@ -463,24 +508,27 @@ async def _dispatch(name: str, args: dict[str, Any]) -> Any:
     # ── 报告工具1：日报 ──────────────────────────────────────────────────────
     elif name == "zentao_daily_report":
         project_id = args["project_id"]
-        log.info("工具调用：zentao_daily_report（project=%s）", project_id)
-        return assemble_daily_report(_get_client(), project_id)
+        force_refresh = bool(args.get("force_refresh", False))
+        log.info("工具调用：zentao_daily_report（project=%s，refresh=%s）", project_id, force_refresh)
+        return assemble_daily_report(_get_client(), project_id, force_refresh=force_refresh)
 
     # ── 报告工具2：版本复盘 ──────────────────────────────────────────────────
     elif name == "zentao_version_review":
         project_id = args["project_id"]
         version    = args.get("version", "auto")
-        log.info("工具调用：zentao_version_review（project=%s，version=%s）", project_id, version)
-        return assemble_review_report(_get_client(), project_id, version)
+        force_refresh = bool(args.get("force_refresh", False))
+        log.info("工具调用：zentao_version_review（project=%s，version=%s，refresh=%s）", project_id, version, force_refresh)
+        return assemble_review_report(_get_client(), project_id, version, force_refresh=force_refresh)
 
     # ── 报告工具3：Bug 界定预分类 ────────────────────────────────────────────
     elif name == "zentao_bug_review":
         project_id = args["project_id"]
         version_id = args.get("version_id")
-        log.info("工具调用：zentao_bug_review（project=%s，version=%s）", project_id, version_id or "auto")
+        force_refresh = bool(args.get("force_refresh", False))
+        log.info("工具调用：zentao_bug_review（project=%s，version=%s，refresh=%s）", project_id, version_id or "auto", force_refresh)
 
         if not version_id:
-            versions = get_versions(_get_client(), project_id)
+            versions = get_versions(_get_client(), project_id, force_refresh=force_refresh)
             prev     = versions.get("prev")
             curr     = versions.get("curr")
             target   = prev or curr
@@ -489,7 +537,7 @@ async def _dispatch(name: str, args: dict[str, Any]) -> Any:
             version_id = target["id"]
             log.info("  自动识别版本：%s（ID=%s）", target.get("name"), version_id)
 
-        return calc_bug_review(_get_client(), version_id, project_id)
+        return calc_bug_review(_get_client(), version_id, project_id, force_refresh=force_refresh)
 
     # ── 报告工具4：保存报告 ──────────────────────────────────────────────────
     elif name == "zentao_save_report":

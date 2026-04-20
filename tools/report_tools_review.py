@@ -104,10 +104,10 @@ def _gen_bug_descriptions(all_bugs: list[dict]) -> dict[str, str]:
 #  版本识别
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _resolve_target_version(client, project_id: str, version: str) -> dict:
+def _resolve_target_version(client, project_id: str, version: str, force_refresh: bool = False) -> dict:
     today_str = date.today().isoformat()
-    undone = client.fetch_versions(status="undone").get("executionStats", [])
-    closed = client.fetch_versions(status="closed").get("executionStats", [])
+    undone = client.fetch_versions(status="undone", force_refresh=force_refresh).get("executionStats", [])
+    closed = client.fetch_versions(status="closed", force_refresh=force_refresh).get("executionStats", [])
     seen: set[str] = set()
     all_execs = []
     for e in undone + closed:
@@ -700,24 +700,29 @@ def _generate_markdown(
 #  主函数
 # ══════════════════════════════════════════════════════════════════════════════
 
-def assemble_review_report(client: ZentaoClient, project_id: str, version: str = "auto") -> dict:
+def assemble_review_report(
+    client: ZentaoClient,
+    project_id: str,
+    version: str = "auto",
+    force_refresh: bool = False,
+) -> dict:
     log.info("开始版本复盘（项目=%s，版本=%s）…", project_id, version)
 
-    target = _resolve_target_version(client, project_id, version)
+    target = _resolve_target_version(client, project_id, version, force_refresh=force_refresh)
     vid, vname = target["id"], target["name"]
     log.info("  目标版本：%s（ID=%s）", vname, vid)
 
     log.info("  [1/4] 拉取Bug数据…")
-    bug_result  = get_version_bugs(client, vid, project_id)
+    bug_result  = get_version_bugs(client, vid, project_id, force_refresh=force_refresh)
 
     log.info("  [2/4] 拉取需求池数据…")
-    pool_result   = get_version_requirements(client, vid, project_id)
+    pool_result   = get_version_requirements(client, vid, project_id, force_refresh=force_refresh)
     pools         = [p for p in pool_result["pools"] if p.get("task_status") != "cancel"]
     task_details  = pool_result.get("task_details", {})
     php_member_map = pool_result.get("php_member_map", {})
 
     log.info("  [3/4] 拉取历史版本趋势数据…")
-    history = get_version_history(client, vid, project_id, max_count=4)
+    history = get_version_history(client, vid, project_id, max_count=4, force_refresh=force_refresh)
 
     log.info("  [4/4] 计算各板块数据…")
     ext         = calc_ext_bugs(bug_result["bugs"], bug_result["dept_review"])

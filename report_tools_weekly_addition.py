@@ -33,13 +33,14 @@ def _assemble_project_weekly(
     client: ZentaoClient,
     project_id: str,
     today: date,
+    force_refresh: bool = False,
 ) -> dict:
     """
     组装单个项目的周汇总数据。
     返回 prev / curr / next 三个版本的完整数据包。
     """
     log.info("  [%s] 识别版本…", project_id)
-    versions = get_versions(client, project_id)
+    versions = get_versions(client, project_id, force_refresh=force_refresh)
     prev = versions.get("prev")
     curr = versions.get("curr")
     nxt  = versions.get("next")
@@ -50,7 +51,7 @@ def _assemble_project_weekly(
     prev_data = None
     if prev:
         log.info("  [%s] 拉取上一版本需求池（%s）…", project_id, prev["name"])
-        prev_req   = get_version_requirements(client, prev["id"], project_id)
+        prev_req   = get_version_requirements(client, prev["id"], project_id, force_refresh=force_refresh)
         prev_pools = [p for p in prev_req["pools"] if p.get("task_status") != "cancel"]
         prev_data  = {
             "info":     prev,
@@ -64,8 +65,8 @@ def _assemble_project_weekly(
     curr_data = None
     if curr:
         log.info("  [%s] 拉取当前版本需求池（%s）…", project_id, curr["name"])
-        curr_req       = get_version_requirements(client, curr["id"], project_id)
-        curr_bugs_data = get_version_bugs(client, curr["id"], project_id)
+        curr_req       = get_version_requirements(client, curr["id"], project_id, force_refresh=force_refresh)
+        curr_bugs_data = get_version_bugs(client, curr["id"], project_id, force_refresh=force_refresh)
 
         curr_pools      = [p for p in curr_req["pools"] if p.get("task_status") != "cancel"]
         curr_td         = curr_req["task_details"]
@@ -91,7 +92,7 @@ def _assemble_project_weekly(
     next_data = None
     if nxt:
         log.info("  [%s] 拉取下一版本需求池（%s）…", project_id, nxt["name"])
-        next_req   = get_version_requirements(client, nxt["id"], project_id)
+        next_req   = get_version_requirements(client, nxt["id"], project_id, force_refresh=force_refresh)
         next_pools = [p for p in next_req["pools"] if p.get("task_status") != "cancel"]
         next_td    = next_req["task_details"]
         next_php   = next_req["php_member_map"]
@@ -121,7 +122,7 @@ def _assemble_project_weekly(
 
 # ─── 主函数：组装双项目周汇总数据包 ──────────────────────────────────────────
 
-def assemble_weekly_report(client: ZentaoClient) -> dict:
+def assemble_weekly_report(client: ZentaoClient, force_refresh: bool = False) -> dict:
     """
     组装周汇总所需的全部数据，包含平台项目和游戏项目。
 
@@ -161,11 +162,11 @@ def assemble_weekly_report(client: ZentaoClient) -> dict:
     all_warnings = []
 
     log.info("  ── 平台项目 ──")
-    platform_data = _assemble_project_weekly(client, "10", today)
+    platform_data = _assemble_project_weekly(client, "10", today, force_refresh=force_refresh)
     all_warnings.extend(platform_data.get("warnings", []))
 
     log.info("  ── 游戏项目 ──")
-    game_data = _assemble_project_weekly(client, "51", today)
+    game_data = _assemble_project_weekly(client, "51", today, force_refresh=force_refresh)
     all_warnings.extend(game_data.get("warnings", []))
 
     report_path = get_report_path("周汇总", make_weekly_filename(today))

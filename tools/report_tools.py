@@ -111,7 +111,7 @@ def _format_dept_workload(dept_workload: dict) -> list[dict]:
 
 # ─── 主函数：组装日报完整数据包 ───────────────────────────────────────────────
 
-def assemble_daily_report(client: ZentaoClient, project_id: str) -> dict:
+def assemble_daily_report(client: ZentaoClient, project_id: str, force_refresh: bool = False) -> dict:
     """
     组装日报所需的全部数据，返回给 Claude。
 
@@ -158,7 +158,7 @@ def assemble_daily_report(client: ZentaoClient, project_id: str) -> dict:
 
     # ── 步骤1：取版本信息 ────────────────────────────────────────────────────
     log.info("  [1/4] 识别版本…")
-    versions = get_versions(client, project_id)
+    versions = get_versions(client, project_id, force_refresh=force_refresh)
     curr     = versions.get("curr")
     nxt      = versions.get("next")
 
@@ -179,8 +179,8 @@ def assemble_daily_report(client: ZentaoClient, project_id: str) -> dict:
 
     # ── 步骤2：取当前版本数据 ────────────────────────────────────────────────
     log.info("  [2/4] 拉取当前版本需求池（%s）…", curr["name"])
-    curr_req  = get_version_requirements(client, curr["id"], project_id)
-    curr_bugs = get_version_bugs(client, curr["id"], project_id)
+    curr_req  = get_version_requirements(client, curr["id"], project_id, force_refresh=force_refresh)
+    curr_bugs = get_version_bugs(client, curr["id"], project_id, force_refresh=force_refresh)
 
     curr_pools       = [p for p in curr_req["pools"] if p.get("task_status") != "cancel"]
     curr_task_details = curr_req["task_details"]
@@ -208,7 +208,7 @@ def assemble_daily_report(client: ZentaoClient, project_id: str) -> dict:
     next_data = None
     if nxt:
         log.info("  [4/4] 拉取下一版本需求池（%s）…", nxt["name"])
-        next_req    = get_version_requirements(client, nxt["id"], project_id)
+        next_req    = get_version_requirements(client, nxt["id"], project_id, force_refresh=force_refresh)
         next_pools  = [p for p in next_req["pools"] if p.get("task_status") != "cancel"]
         next_td     = next_req["task_details"]
         next_php_map = next_req["php_member_map"]
