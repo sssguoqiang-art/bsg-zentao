@@ -11,9 +11,11 @@ mcp_server.py  —  BSG 禅道 MCP Server
 
   报告工具（复合）：
     - zentao_daily_report          生成并保存日报
+    - zentao_weekly_report         生成效能周汇总/效能周报数据包
     - zentao_version_review        【版本复盘】正式复盘文档
     - zentao_bug_review            【Bug界定】复盘前预分类材料
-    - zentao_save_report           保存 Claude 生成的报告内容
+    - zentao_save_report           保存日报/复盘/Bug界定内容
+    - zentao_save_weekly_report    保存周汇总/周报内容
 
   知识库工具：
     - user_get_context             获取用户上下文
@@ -50,6 +52,7 @@ from tools.data_tools import get_versions, get_version_requirements, get_version
 from tools.report_tools import assemble_daily_report, save_daily_report
 from tools.calc_bug_review import calc_bug_review, save_bug_review_report
 from tools.report_tools_review import assemble_review_report, save_review_report
+from report_tools_weekly_addition import assemble_weekly_report, save_weekly_report
 
 # ─── 日志配置 ─────────────────────────────────────────────────────────────────
 
@@ -288,7 +291,29 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
 
-        # ── 报告工具3：Bug 界定预分类 ──────────────────────────────────────────
+        # ── 报告工具3：周汇总 / 周报 ───────────────────────────────────────────
+        types.Tool(
+            name="zentao_weekly_report",
+            description=(
+                "生成本周周汇总数据包，固定抓取平台项目和游戏项目的上一/当前/下一版本信息。"
+                "调用后由 Claude 生成两份内容：效能周汇总（管理会议版）和效能周报（管理层版）。"
+                "用户说'帮我出本周周汇总'、'帮我出本周周报'、'生成周汇总'时调用此工具。"
+                "用户明确说'刷新一下'、'拉最新'时，传 force_refresh=true。"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "force_refresh": {
+                        "type": "boolean",
+                        "description": "是否强制跳过短 TTL 缓存，直接拉取最新数据。",
+                        "default": False,
+                    },
+                },
+                "required": [],
+            },
+        ),
+
+        # ── 报告工具4：Bug 界定预分类 ──────────────────────────────────────────
         types.Tool(
             name="zentao_bug_review",
             description=(
@@ -321,7 +346,7 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
 
-        # ── 报告工具4：保存报告 ────────────────────────────────────────────────
+        # ── 报告工具5：保存日报 / 复盘 / Bug界定 ─────────────────────────────
         types.Tool(
             name="zentao_save_report",
             description=(
@@ -335,6 +360,30 @@ async def list_tools() -> list[types.Tool]:
                     "project_id":   {"type": "string", "description": "项目 ID，用于确定保存目录。"},
                     "report_type":  {"type": "string", "description": "报告类型：daily / review / bug_review。", "enum": ["daily", "review", "bug_review"]},
                     "version_name": {"type": "string", "description": "版本名称，report_type=review/bug_review 时必传，如 'V2.11.0（0408）'。"},
+                },
+                "required": ["content", "report_type"],
+            },
+        ),
+
+        # ── 报告工具6：保存周汇总 / 周报 ──────────────────────────────────────
+        types.Tool(
+            name="zentao_save_weekly_report",
+            description=(
+                "将 Claude 生成的周汇总或周报内容保存到本地文件。"
+                "通常在 Claude 生成报告正文后自动调用。"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "要保存的报告内容（Markdown 格式）。",
+                    },
+                    "report_type": {
+                        "type": "string",
+                        "description": "报告类型：weekly_summary（效能周汇总）或 weekly_report（效能周报）。",
+                        "enum": ["weekly_summary", "weekly_report"],
+                    },
                 },
                 "required": ["content", "report_type"],
             },
@@ -520,7 +569,13 @@ async def _dispatch(name: str, args: dict[str, Any]) -> Any:
         log.info("工具调用：zentao_version_review（project=%s，version=%s，refresh=%s）", project_id, version, force_refresh)
         return assemble_review_report(_get_client(), project_id, version, force_refresh=force_refresh)
 
-    # ── 报告工具3：Bug 界定预分类 ────────────────────────────────────────────
+    # ── 报告工具3：周汇总 / 周报 ──────────────────────────────────────────────
+    elif name == "zentao_weekly_report":
+        force_refresh = bool(args.get("force_refresh", False))
+        log.info("工具调用：zentao_weekly_report（refresh=%s）", force_refresh)
+        return assemble_weekly_report(_get_client(), force_refresh=force_refresh)
+
+    # ── 报告工具4：Bug 界定预分类 ────────────────────────────────────────────
     elif name == "zentao_bug_review":
         project_id = args["project_id"]
         version_id = args.get("version_id")
@@ -539,7 +594,7 @@ async def _dispatch(name: str, args: dict[str, Any]) -> Any:
 
         return calc_bug_review(_get_client(), version_id, project_id, force_refresh=force_refresh)
 
-    # ── 报告工具4：保存报告 ──────────────────────────────────────────────────
+    # ── 报告工具5：保存日报 / 复盘 / Bug界定 ─────────────────────────────────
     elif name == "zentao_save_report":
         content      = args["content"]
         project_id   = args.get("project_id", "10")
@@ -560,6 +615,14 @@ async def _dispatch(name: str, args: dict[str, Any]) -> Any:
         else:
             raise ValueError(f"暂不支持的报告类型：{report_type}")
 
+        return {"saved": True, "path": path, "message": f"报告已保存到：{path}"}
+
+    # ── 报告工具6：保存周汇总 / 周报 ─────────────────────────────────────────
+    elif name == "zentao_save_weekly_report":
+        content     = args["content"]
+        report_type = args.get("report_type", "weekly_summary")
+        log.info("工具调用：zentao_save_weekly_report（type=%s）", report_type)
+        path = save_weekly_report(content, report_type=report_type)
         return {"saved": True, "path": path, "message": f"报告已保存到：{path}"}
 
     # ── 知识库工具1：获取用户上下文 ──────────────────────────────────────────

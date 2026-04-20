@@ -10,9 +10,8 @@ import logging
 from datetime import date
 
 from bsg_zentao.client import ZentaoClient
-from bsg_zentao.constants import ACTIVE_PROJECTS
 from bsg_zentao.utils import (
-    get_report_path, make_weekly_filename,
+    get_report_path,
     weekday_cn, fmt_date_full,
 )
 from tools.data_tools import get_versions, get_version_requirements, get_version_bugs
@@ -26,6 +25,19 @@ from tools.calc_weekly import (
 from tools.report_tools import _format_dept_progress, _format_dept_workload, _project_name
 
 log = logging.getLogger(__name__)
+
+_WEEKLY_REPORT_LABELS = {
+    "weekly_summary": "效能周汇总",
+    "weekly_report": "效能周报",
+}
+
+
+def _make_weekly_variant_filename(ref: date, report_type: str) -> str:
+    year, week, _ = ref.isocalendar()
+    label = _WEEKLY_REPORT_LABELS.get(report_type)
+    if not label:
+        raise ValueError(f"不支持的周报类型：{report_type}")
+    return f"{year}{week:02d}_{label}.md"
 
 # ─── 单项目周数据组装 ─────────────────────────────────────────────────────────
 
@@ -146,7 +158,10 @@ def assemble_weekly_report(client: ZentaoClient, force_refresh: bool = False) ->
         "game": {       # 游戏项目（project_id=51）
             ...          # 同上结构
         },
-        "report_path": "~/.bsg-zentao/报告/周汇总/202616_周汇总.md",
+        "report_paths": {
+            "weekly_summary": "…/报告/周汇总/202616_效能周汇总.md",
+            "weekly_report":  "…/报告/周汇总/202616_效能周报.md",
+        },
     }
 
     Claude 拿到此数据后：
@@ -169,7 +184,8 @@ def assemble_weekly_report(client: ZentaoClient, force_refresh: bool = False) ->
     game_data = _assemble_project_weekly(client, "51", today, force_refresh=force_refresh)
     all_warnings.extend(game_data.get("warnings", []))
 
-    report_path = get_report_path("周汇总", make_weekly_filename(today))
+    summary_path = get_report_path("周汇总", _make_weekly_variant_filename(today, "weekly_summary"))
+    report_path = get_report_path("周汇总", _make_weekly_variant_filename(today, "weekly_report"))
 
     log.info("周汇总数据组装完成。")
     return {
@@ -180,20 +196,28 @@ def assemble_weekly_report(client: ZentaoClient, force_refresh: bool = False) ->
         },
         "platform":    platform_data,
         "game":        game_data,
-        "report_path": str(report_path),
+        "report_path": str(summary_path),
+        "report_paths": {
+            "weekly_summary": str(summary_path),
+            "weekly_report": str(report_path),
+        },
     }
 
 
 # ─── 保存周报文件 ─────────────────────────────────────────────────────────────
 
-def save_weekly_report(content: str, today: date | None = None) -> str:
+def save_weekly_report(
+    content: str,
+    report_type: str = "weekly_summary",
+    today: date | None = None,
+) -> str:
     """
-    把 Claude 生成的周汇总内容保存到本地文件。
+    把 Claude 生成的周汇总/周报内容保存到本地文件。
     返回保存路径字符串。
     """
     ref      = today or date.today()
-    filename = make_weekly_filename(ref)
+    filename = _make_weekly_variant_filename(ref, report_type)
     path     = get_report_path("周汇总", filename)
     path.write_text(content, encoding="utf-8")
-    log.info("周汇总已保存：%s", path)
+    log.info("%s已保存：%s", _WEEKLY_REPORT_LABELS.get(report_type, "周报"), path)
     return str(path)
