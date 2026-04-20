@@ -1,8 +1,8 @@
 # BSG 禅道助手
 
-基于 Claude Code 的禅道数据查询和报告生成工具。
+基于 Claude Code 的禅道数据查询和报告生成工具，也支持在 Codex 中使用。
 
-克隆此仓库后，在 Claude Code 中用自然语言直接操作禅道数据：
+克隆此仓库后，在 Claude Code 或 Codex 中用自然语言直接操作禅道数据：
 
 ```
 帮我出今天的平台项目日报
@@ -19,7 +19,7 @@
 
 ## 前提条件
 
-- **Claude Code 已安装并登录**（必须）
+- **Claude Code 或 Codex 已安装并登录**（至少其一）
 - Python 3.11 或以上
 - 网络能访问禅道内网（`https://cd.baa360.cc:20088`）
 
@@ -30,9 +30,10 @@
 ```
 bsg-zentao/
 │
-│  ── 给 Claude Code 读的文件 ──────────────────────────────────────
-├── CLAUDE.md              业务规则（Claude 靠这个理解禅道业务，生成准确报告）
-├── bsg-zentao-api.skill   禅道接口规范 Skill（需安装到 Claude Code）
+│  ── 给 AI Agent 读的文件 ────────────────────────────────────────
+├── CLAUDE.md              业务规则（Claude Code 默认读取）
+├── AGENTS.md              Codex 工作指引（Codex 默认读取，并指向 CLAUDE.md）
+├── bsg-zentao-api.skill   禅道接口规范 Skill（需安装到 Claude Code / Codex）
 │
 │  ── 给用户看的文件 ────────────────────────────────────────────────
 ├── README.md              本文件
@@ -62,6 +63,13 @@ bsg-zentao/
     ├── report_tools.py        日报数据组装
     └── report_tools_review.py 版本复盘数据组装
 ```
+
+## Claude / Codex 默认文件说明
+
+- `CLAUDE.md`：给 Claude Code 用的默认项目规则文件
+- `AGENTS.md`：给 Codex 用的默认项目规则文件
+- 本仓库会同时保留两份文件：`CLAUDE.md` 不动，`AGENTS.md` 作为 Codex 入口，并在需要时引用 `CLAUDE.md` 中的业务规则
+- `bsg-zentao-api.skill` 可安装到 Claude Code 或 Codex，供两边统一使用禅道接口规范
 
 以下内容在用户本机自动生成，**不进 git**：
 
@@ -113,13 +121,15 @@ cd bsg-zentao
 pip3 install -r requirements.txt
 ```
 
-### 第四步：安装 Skill 到 Claude Code
+### 第四步：安装 Skill 到 AI 助手
 
-在 Claude Code 中输入：
+在 Claude Code 或 Codex 中输入：
 
 ```
 请安装仓库里的 bsg-zentao-api.skill 文件
 ```
+
+如果你使用 Codex，安装完成后请重启 Codex；打开仓库根目录时，Codex 会自动读取 `AGENTS.md`。
 
 ### 第五步：初始化配置（账号 + 个人知识库）
 
@@ -147,6 +157,12 @@ claude mcp add bsg-zentao python3 ~/bsg-zentao/mcp_server.py
 > `claude mcp add bsg-zentao python3 ~/Desktop/bsg-zentao/mcp_server.py`
 
 重启 Claude Code 后即可使用。
+
+### Codex 用户补充说明
+
+- Codex 默认读取仓库根目录的 `AGENTS.md`
+- `CLAUDE.md` 仍保留给 Claude Code 使用，不需要删除或改名
+- 如果你也想在 Codex 中接入 `mcp_server.py`，请按你本机 Codex 的 MCP 配置方式注册该脚本
 
 ---
 
@@ -181,13 +197,15 @@ cd bsg-zentao
 pip install -r requirements.txt
 ```
 
-### 第四步：安装 Skill 到 Claude Code
+### 第四步：安装 Skill 到 AI 助手
 
-在 Claude Code 中输入：
+在 Claude Code 或 Codex 中输入：
 
 ```
 请安装仓库里的 bsg-zentao-api.skill 文件
 ```
+
+如果你使用 Codex，安装完成后请重启 Codex；打开仓库根目录时，Codex 会自动读取 `AGENTS.md`。
 
 ### 第五步：初始化配置（账号 + 个人知识库）
 
@@ -202,6 +220,12 @@ claude mcp add bsg-zentao python C:\Users\你的用户名\bsg-zentao\mcp_server.
 ```
 
 重启 Claude Code 后即可使用。
+
+### Codex 用户补充说明
+
+- Codex 默认读取仓库根目录的 `AGENTS.md`
+- `CLAUDE.md` 仍保留给 Claude Code 使用，不需要删除或改名
+- 如果你也想在 Codex 中接入 `mcp_server.py`，请按你本机 Codex 的 MCP 配置方式注册该脚本
 
 ---
 
@@ -451,6 +475,9 @@ cd bsg-zentao
 git pull
 pip install -r requirements.txt
 ```
+
+**Q：为什么仓库里同时有 `CLAUDE.md` 和 `AGENTS.md`？**
+`CLAUDE.md` 给 Claude Code 用，`AGENTS.md` 给 Codex 用。两者可以同时存在：Claude 继续读 `CLAUDE.md`，Codex 读取 `AGENTS.md`，而 `AGENTS.md` 会把 Codex 引导到这套现有业务规则上。
 
 ---
 
