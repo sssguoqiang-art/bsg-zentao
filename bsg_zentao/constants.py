@@ -150,6 +150,43 @@ STATUS_TESTING = frozenset({"waittest", "testing"})
 # 开发阶段（还在推进中）
 STATUS_DEV = frozenset({"wait", "doing", "pause", "rejected", "reviewing", "unsure"})
 
+# ─── 任务/子任务状态显示文案（用于最终报告输出）───────────────────────────────
+
+TASK_STATUS_DISPLAY = {
+    "wait":      "未开始",
+    "doing":     "处理中",
+    "pause":     "已暂停",
+    "rejected":  "已驳回",
+    "reviewing": "审核中",
+    "unsure":    "待确认",
+    "waittest":  "待测试",
+    "testing":   "测试中",
+    "done":      "已完成",
+    "closed":    "已关闭",
+    "cancel":    "已取消",
+}
+
+
+def get_task_status_display(status: str) -> str:
+    """任务/子任务状态码 → 中文显示文案。"""
+    return TASK_STATUS_DISPLAY.get(status or "", status or "—")
+
+
+# ─── 环境状态显示文案（用于日报输出）────────────────────────────────────────
+
+ENV_DISPLAY = {
+    "require":   "待合并",
+    "noRequire": "无需合并",
+    "devDone":   "开发完成",
+    "fixDone":   "已完成",
+    "deliver":   "已交付",
+}
+
+
+def get_env_display(env: str) -> str:
+    """env 状态码 → 中文显示文案。"""
+    return ENV_DISPLAY.get(env or "", env or "—")
+
 # ─── Bug 分类（bug 对象的 classification 字段）───────────────────────────────
 
 # 线上 Bug：外部开发Bug(1) + 外部历史Bug(2)

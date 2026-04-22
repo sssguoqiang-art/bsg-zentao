@@ -26,7 +26,7 @@ from bsg_zentao.constants import (
     CATEGORY_DISPLAY, PHPGROUP_DEPT_MAP, REPORT_DEPTS_RAW,
     STATUS_DEV, STATUS_DONE, STATUS_TESTING,
     TASK_DETAIL_DEPT_MAP, ONLINE_BUG_CLASSIFICATIONS,
-    to_display,
+    get_env_display, get_task_status_display, to_display,
 )
 from bsg_zentao.utils import fmt_date, days_overdue, parse_date
 
@@ -54,11 +54,48 @@ _ORDERTYPE_NAME: dict[str, str] = {
 }
 
 _DATE_ZERO = "0000-00-00"
+_FOLLOWUP_DEPTS_RAW = REPORT_DEPTS_RAW + ["测试部"]
+_FOLLOWUP_DEPT_MAP = {**TASK_DETAIL_DEPT_MAP, "qa": "测试部"}
+_STATUS_DEV_PROGRESS = frozenset({"wait", "doing", "pause", "rejected", "unsure"})
+_STATUS_FOLLOWUP_ACTIVE = _STATUS_DEV_PROGRESS | STATUS_TESTING
 
 
 def _ordertype_name(sub: dict) -> str:
     """从子任务对象取单子类型名称。"""
     return _ORDERTYPE_NAME.get(str(sub.get("ordertype", "") or ""), "其他")
+
+
+def _format_hours(hours: float) -> str:
+    """工时展示：整数不带小数，非整数保留 1 位。"""
+    if abs(hours - int(hours)) < 1e-9:
+        return f"{int(hours)}h"
+    return f"{hours:.1f}h"
+
+
+def get_pool_scope_deadline(pool: dict) -> str:
+    """
+    需求纳入版本范围时使用的主任务截止时间。
+
+    口径：
+      1. 优先 main_deadline（更贴近禅道页面“截止时间”）
+      2. main_deadline 为空时，回退 deadline
+      3. 两者都为空时，返回空串
+    """
+    main_deadline = pool.get("main_deadline", "") or ""
+    if main_deadline and main_deadline != _DATE_ZERO:
+        return main_deadline
+
+    deadline = pool.get("deadline", "") or ""
+    if deadline and deadline != _DATE_ZERO:
+        return deadline
+
+    return ""
+
+
+def is_pool_in_version(pool: dict, version_end: str) -> bool:
+    """主任务截止时间在当前版本截止日内，才算本版本交付范围。"""
+    scope_deadline = get_pool_scope_deadline(pool)
+    return bool(scope_deadline and scope_deadline <= version_end)
 
 
 # ─── 内部：PHP 部门归属推断 ───────────────────────────────────────────────────
@@ -142,6 +179,107 @@ def _get_dept_subtasks(
     return result
 
 
+def _get_followup_subtasks(
+    pool: dict,
+    task_details: dict,
+    php_member_map: dict,
+) -> dict[str, list[dict]]:
+    """
+    返回日报跟进场景需要的部门子任务。
+
+    与 _get_dept_subtasks 的区别：
+      - 保留测试部（qa），用于“测试处理中”与“卡住部门”识别
+      - 仍然按 PHP 归属规则拆分 devel → PHP1部 / PHP2部
+    """
+    task_id = pool.get("task_id", "") or ""
+    if not task_id:
+        return {}
+
+    detail = task_details.get(task_id)
+    if not isinstance(detail, dict):
+        return {}
+
+    php_dept: str | None = None
+    result: dict[str, list[dict]] = {}
+
+    for dept_key, subs in detail.items():
+        if not isinstance(subs, list):
+            continue
+
+        if dept_key == "devel":
+            if php_dept is None:
+                php_dept = _get_php_dept(pool, task_details, php_member_map)
+            dept = php_dept
+        else:
+            dept = _FOLLOWUP_DEPT_MAP.get(dept_key, "")
+
+        if dept not in _FOLLOWUP_DEPTS_RAW:
+            continue
+
+        valid = [s for s in subs if isinstance(s, dict) and s.get("deleted") != "1"]
+        if valid:
+            result.setdefault(dept, []).extend(valid)
+
+    return result
+
+
+def _build_blocked_details(
+    pool: dict,
+    task_details: dict,
+    php_member_map: dict,
+    active_statuses: frozenset[str] | None = None,
+) -> list[dict]:
+    """
+    汇总需求当前仍未收口的部门信息，返回可直接用于日报的人话结构。
+
+    active_statuses:
+      - 传 STATUS_DEV：只看开发阶段未完成子任务
+      - 传 None：看所有未完成子任务（含测试部）
+    """
+    dept_subs = _get_followup_subtasks(pool, task_details, php_member_map)
+    order_map = {dept: i for i, dept in enumerate(_FOLLOWUP_DEPTS_RAW)}
+    rows: list[dict] = []
+
+    for dept, subs in dept_subs.items():
+        if active_statuses is None:
+            active = [s for s in subs if s.get("status") not in STATUS_DONE]
+        else:
+            active = [s for s in subs if s.get("status") in active_statuses]
+
+        if not active:
+            continue
+
+        type_cnt = Counter(_ordertype_name(s) for s in active)
+        status_codes = sorted({str(s.get("status", "") or "") for s in active if s.get("status", "")})
+        status_labels = [get_task_status_display(code) for code in status_codes]
+        type_summary = "、".join(f"{cnt}张{name}" for name, cnt in type_cnt.most_common())
+        total_left = round(sum(float(s.get("left", 0.0) or 0.0) for s in active), 1)
+
+        if len(status_labels) == 1:
+            summary = f"{to_display(dept)}还有{type_summary}，当前处于{status_labels[0]}"
+        else:
+            status_text = "、".join(status_labels)
+            summary = f"{to_display(dept)}还有{type_summary}，当前分别处于{status_text}"
+
+        if total_left > 0:
+            summary += f"，剩余约{_format_hours(total_left)}"
+
+        rows.append({
+            "dept_raw":        dept,
+            "dept":            to_display(dept),
+            "pending_count":   len(active),
+            "type_summary":    type_summary,
+            "status_codes":    status_codes,
+            "status_display":  "、".join(status_labels),
+            "total_left":      total_left,
+            "total_left_display": _format_hours(total_left) if total_left > 0 else "—",
+            "summary":         summary,
+        })
+
+    rows.sort(key=lambda r: order_map.get(r["dept_raw"], 99))
+    return rows
+
+
 # ─── 1. 需求总览统计 ──────────────────────────────────────────────────────────
 
 def calc_summary(pools: list[dict]) -> dict:
@@ -164,7 +302,7 @@ def calc_summary(pools: list[dict]) -> dict:
     total     = len(active_pools)
     done      = sum(1 for p in active_pools if p.get("task_status") in STATUS_DONE - {"cancel"})
     testing   = sum(1 for p in active_pools if p.get("task_status") in STATUS_TESTING)
-    dev       = sum(1 for p in active_pools if p.get("task_status") in STATUS_DEV)
+    dev       = sum(1 for p in active_pools if p.get("task_status") in _STATUS_DEV_PROGRESS)
     unordered = sum(1 for p in active_pools if p.get("is_unordered", False))
     postponed = sum(1 for p in active_pools if p.get("is_postponed", False))
 
@@ -189,9 +327,9 @@ def calc_dept_progress(
     """
     计算各部门进度表。
 
-    过滤条件：pool.deadline <= version_end
-    ⚠️ 使用 deadline（任务实际截止日期），不是 deliveryDate（PM 计划日期）。
-       旧脚本在此处用了 deliveryDate，是已知 bug，此处已修正。
+    过滤条件：主任务截止时间 <= version_end
+    ⚠️ 这里使用主任务截止时间（main_deadline 优先，deadline 兜底），
+       子任务 deadline 只用于后续异常判断，不用于判定是否属于本版本交付。
 
     返回：{接口原始部门名: {remaining_tasks, remaining_label, total_left, total_consumed, progress_pct}}
 
@@ -213,9 +351,8 @@ def calc_dept_progress(
         if pool.get("task_status") in STATUS_DONE:
             continue
 
-        # 版本交付过滤：用 deadline
-        dl = pool.get("deadline", "") or ""
-        if not dl or dl == _DATE_ZERO or dl > version_end:
+        scope_deadline = get_pool_scope_deadline(pool)
+        if not scope_deadline or scope_deadline > version_end:
             continue
 
         dept_subs = _get_dept_subtasks(pool, task_details, php_member_map)
@@ -225,7 +362,7 @@ def calc_dept_progress(
                 left     = sub.get("left", 0.0)
                 consumed = sub.get("consumed", 0.0)
                 stats[dept]["total_consumed"] += consumed
-                if status in STATUS_DEV:
+                if status in _STATUS_DEV_PROGRESS:
                     stats[dept]["remaining_tasks"] += 1
                     stats[dept]["total_left"]      += left
                     stats[dept]["_type_cnt"][_ordertype_name(sub)] += 1
@@ -265,11 +402,12 @@ def calc_delay_list(
     pools: list[dict],
     task_details: dict,
     php_member_map: dict,
+    version_end: str,
     today: date,
 ) -> list[dict]:
     """
     找出所有已超期的子任务。
-    条件：子任务 deadline < today AND status in STATUS_DEV AND 主需求未完成。
+    条件：子任务 deadline < today AND status in STATUS_DEV AND 主需求属于当前版本交付范围且未完成。
 
     按（部门 + 截止日）去重，同一需求同一部门同一截止日只出一条。
     按超期天数降序排列（最严重的在前）。
@@ -284,12 +422,15 @@ def calc_delay_list(
         if pool.get("task_status") in STATUS_DONE:
             continue
 
+        if not is_pool_in_version(pool, version_end):
+            continue
+
         dept_subs = _get_dept_subtasks(pool, task_details, php_member_map)
         seen: set = set()
 
         for dept, subs in dept_subs.items():
             for sub in subs:
-                if sub.get("status") not in STATUS_DEV:
+                if sub.get("status") not in _STATUS_DEV_PROGRESS:
                     continue
                 dl = sub.get("deadline", "") or ""
                 if not dl or dl == _DATE_ZERO or dl >= today_str:
@@ -325,8 +466,8 @@ def calc_not_test_list(
     """
     找出未到测试且在版本截止范围内的需求，分为今日截止和其他临期两组。
 
-    条件：pool.deadline <= version_end AND taskStatus in STATUS_DEV
-    ⚠️ 同样用 deadline，不是 deliveryDate。
+    条件：主任务截止时间 <= version_end AND taskStatus in STATUS_DEV
+    ⚠️ 主任务是否属于本版本，用主任务截止时间判断；子任务 deadline 只用于异常说明。
 
     今日截止（today_due）：deadline == today，需在报告中置顶标注
     其他临期（other_due）：deadline 在今天之后但 <= version_end
@@ -338,7 +479,8 @@ def calc_not_test_list(
     }
 
     每条数据字段：
-      title, category, blocked_depts（显示名列表）,
+      task_id, title, category, task_status_display,
+      blocked_depts / blocked_details（卡住部门与中文状态说明）,
       deadline, deadline_display, overdue_days, progress, is_postponed
     """
     today_str  = today.isoformat()
@@ -346,22 +488,17 @@ def calc_not_test_list(
     other_due  = []
 
     for pool in pools:
-        if pool.get("task_status") not in STATUS_DEV:
+        if pool.get("task_status") not in _STATUS_DEV_PROGRESS:
             continue
 
-        dl = pool.get("deadline", "") or ""
-        if not dl or dl == _DATE_ZERO or dl > version_end:
+        scope_deadline = get_pool_scope_deadline(pool)
+        if not scope_deadline or scope_deadline > version_end:
             continue
 
-        # 卡住的部门：该需求下还有未完成子任务的部门
-        dept_subs = _get_dept_subtasks(pool, task_details, php_member_map)
-        blocked = [
-            to_display(dept)
-            for dept, subs in dept_subs.items()
-            if any(s.get("status") in STATUS_DEV for s in subs)
-        ]
+        blocked_details = _build_blocked_details(pool, task_details, php_member_map, _STATUS_DEV_PROGRESS)
+        blocked = [r["dept"] for r in blocked_details]
 
-        overdue = days_overdue(dl, today)
+        overdue = days_overdue(scope_deadline, today)
         # 进度字符串取数字部分
         prog_str = str(pool.get("progress", "0") or "0").rstrip("%")
         try:
@@ -370,18 +507,22 @@ def calc_not_test_list(
             progress_int = 0
 
         row = {
+            "task_id":         pool.get("task_id", "") or "",
             "title":           pool.get("title", ""),
             "category":        CATEGORY_DISPLAY.get(pool.get("category", ""), "—"),
+            "task_status":     pool.get("task_status", "") or "",
+            "task_status_display": get_task_status_display(pool.get("task_status", "") or ""),
             "blocked_depts":   blocked,
-            "deadline":        dl,
-            "deadline_display": fmt_date(dl),
+            "blocked_details": blocked_details,
+            "deadline":        scope_deadline,
+            "deadline_display": fmt_date(scope_deadline),
             "overdue_days":    overdue,
             "progress":        f"{progress_int}%",
             "progress_int":    progress_int,   # 排序用，不输出
             "is_postponed":    pool.get("is_postponed", False),
         }
 
-        if dl == today_str:
+        if scope_deadline == today_str:
             today_due.append(row)
         else:
             other_due.append(row)
@@ -410,7 +551,8 @@ def calc_test_focus(pools: list[dict], bugs: list[dict]) -> list[dict]:
       - type != "performance"（非Bug，排除）
       - 通过 main_task_id 关联到需求
 
-    返回字段：title, category, active_bugs（数量）, env
+    返回字段：task_id, title, category, active_bugs（数量）, env,
+    task_status_display, env_display
     """
     # 建立 task_id → active bug 数 映射
     active_bug_map: dict[str, int] = {}
@@ -435,13 +577,114 @@ def calc_test_focus(pools: list[dict], bugs: list[dict]) -> list[dict]:
             continue
 
         rows.append({
+            "task_id":     task_id,
             "title":       pool.get("title", ""),
             "category":    CATEGORY_DISPLAY.get(pool.get("category", ""), "—"),
             "active_bugs": active_bugs,
+            "task_status": pool.get("task_status", "") or "",
+            "task_status_display": get_task_status_display(pool.get("task_status", "") or ""),
             "env":         env,
-            "env_display": "需合并" if env == "require" else env,
+            "env_display": get_env_display(env),
         })
 
+    return rows
+
+
+def calc_testing_followups(
+    pools: list[dict],
+    task_details: dict,
+    php_member_map: dict,
+    version_end: str,
+) -> list[dict]:
+    """
+    发布日/普通日都可用的“测试处理中”清单。
+
+    条件：
+      - 主任务截止时间 <= version_end
+      - taskStatus in STATUS_TESTING
+      - 且存在未完成子任务，或主任务仍是 waittest，或 env == "require"
+    """
+    rows: list[dict] = []
+
+    for pool in pools:
+        if pool.get("task_status") not in STATUS_TESTING:
+            continue
+
+        scope_deadline = get_pool_scope_deadline(pool)
+        if not scope_deadline or scope_deadline > version_end:
+            continue
+
+        blocked_details = _build_blocked_details(pool, task_details, php_member_map, _STATUS_FOLLOWUP_ACTIVE)
+        env = pool.get("env", "") or ""
+
+        if not blocked_details and pool.get("task_status") != "waittest" and env != "require":
+            continue
+
+        rows.append({
+            "task_id":           pool.get("task_id", "") or "",
+            "title":             pool.get("title", ""),
+            "category":          CATEGORY_DISPLAY.get(pool.get("category", ""), "—"),
+            "task_status":       pool.get("task_status", "") or "",
+            "task_status_display": get_task_status_display(pool.get("task_status", "") or ""),
+            "blocked_depts":     [r["dept"] for r in blocked_details],
+            "blocked_details":   blocked_details,
+            "deadline":          scope_deadline,
+            "deadline_display":  fmt_date(scope_deadline),
+            "env":               env,
+            "env_display":       get_env_display(env),
+            "progress":          pool.get("progress", "0") or "0",
+        })
+
+    rows.sort(key=lambda r: (r["deadline"], r["task_id"]))
+    return rows
+
+
+def calc_merge_pending(
+    pools: list[dict],
+    task_details: dict,
+    php_member_map: dict,
+    version_end: str,
+) -> list[dict]:
+    """
+    当前版本中仍标记为“待合并”的需求列表。
+
+    条件：
+      - 主任务截止时间 <= version_end
+      - env == "require"
+      - taskStatus != cancel
+    """
+    rows: list[dict] = []
+
+    for pool in pools:
+        if pool.get("task_status") == "cancel":
+            continue
+        if (pool.get("env", "") or "") != "require":
+            continue
+
+        scope_deadline = get_pool_scope_deadline(pool)
+        if not scope_deadline or scope_deadline > version_end:
+            continue
+
+        blocked_details = _build_blocked_details(pool, task_details, php_member_map, _STATUS_FOLLOWUP_ACTIVE)
+        task_status = pool.get("task_status", "") or ""
+        is_done = task_status in STATUS_DONE - {"cancel"} or task_status == "reviewing"
+
+        rows.append({
+            "task_id":             pool.get("task_id", "") or "",
+            "title":               pool.get("title", ""),
+            "category":            CATEGORY_DISPLAY.get(pool.get("category", ""), "—"),
+            "task_status":         task_status,
+            "task_status_display": get_task_status_display(task_status),
+            "deadline":            scope_deadline,
+            "deadline_display":    fmt_date(scope_deadline),
+            "env":                 "require",
+            "env_display":         get_env_display("require"),
+            "blocked_depts":       [r["dept"] for r in blocked_details],
+            "blocked_details":     blocked_details,
+            "is_done":             is_done,
+        })
+
+    rows.sort(key=lambda r: (r["is_done"], r["deadline"], r["task_id"]))
     return rows
 
 
@@ -520,13 +763,15 @@ def calc_next_workload(
     """
     下一版本各部门工时总览及未下单需求列表。
 
-    版本交付判断（下一版本用 delivery_date，不是 deadline）：
-      delivery_date <= version_end → 属于本版本交付范围
-      delivery_date 为空且未完成  → 视为本版本交付（兜底逻辑）
+    版本交付判断（下一版本）：
+      1. 优先用主任务截止时间（main_deadline）
+      2. main_deadline 为空时，回退用 deadline
+      3. 两者都为空时，不计入“版本交付”列
 
-    ⚠️ 此处用 delivery_date 是正确的，与当前版本进度统计用 deadline 不同：
-      - 当前版本：用 deadline（实际截止日）过滤，判断哪些任务"应在本版交付"
-      - 下一版本：用 delivery_date（PM 计划日）展示，判断 PM 计划本版交付的需求
+    原因：
+      - 禅道页面“截止时间”口径更接近 main_deadline
+      - 子任务 deadline 主要用于异常判断，不应用来决定是否属于版本交付
+      - 两者都为空时，默认算进版本交付会把统计明显放大
 
     返回：
     {
@@ -576,12 +821,7 @@ def calc_next_workload(
             })
             continue
 
-        # 版本交付判断（用 delivery_date）
-        ddl = pool.get("delivery_date", "") or ""
-        if not ddl or ddl == _DATE_ZERO:
-            in_v = pool.get("task_status") not in STATUS_DONE_ALL
-        else:
-            in_v = ddl <= version_end
+        in_v = is_pool_in_version(pool, version_end)
 
         task_id    = pool.get("task_id", "") or ""
         detail     = task_details.get(task_id)
@@ -614,13 +854,23 @@ def calc_next_workload(
                 continue
 
             est = sum(s.get("estimate", 0.0) for s in non_deleted)
-            dept_est_map[dept] = dept_est_map.get(dept, 0.0) + est
+            bucket = dept_est_map.setdefault(dept, {"has_task": False, "estimate": 0.0})
+            # 页面统计里，Web/Cocos 的 0h 子任务仍会计入任务数；
+            # PHP/美术的 0h 占位子任务不计入部门任务数。
+            count_as_task = est > 0 or dept_key in {"web", "cocos"}
+            if count_as_task:
+                bucket["has_task"] = True
+            if est > 0:
+                bucket["estimate"] += est
 
-        for dept, est in dept_est_map.items():
-            dept_workload[dept]["tasks"]    += 1
+        for dept, meta in dept_est_map.items():
+            if not meta.get("has_task"):
+                continue
+            est = meta.get("estimate", 0.0)
+            dept_workload[dept]["tasks"] += 1
             dept_workload[dept]["estimate"] += est
             if in_v:
-                dept_workload[dept]["tasks_in_v"]    += 1
+                dept_workload[dept]["tasks_in_v"] += 1
                 dept_workload[dept]["estimate_in_v"] += est
 
     # 工时取整

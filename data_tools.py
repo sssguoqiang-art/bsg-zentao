@@ -171,6 +171,7 @@ def _slim_pool(pool: dict, pms: dict, bug_stat: dict, rejected_stat: dict) -> di
         "env":          pool.get("env", "") or "",         # require/devel/deliver/devDone/fixDone
         # 日期（两个字段保留，含义不同）
         "deadline":     pool.get("deadline", "") or "",    # 实际截止，过滤和延期判断
+        "main_deadline":pool.get("mainDeadline", "") or "", # 主任务截止，部分页面显示口径走这里
         "delivery_date":pool.get("deliveryDate", "") or "",# 计划日期，规划展示
         # 进度
         "progress":     pool.get("progress", "0") or "0", # 字符串，如 "43%"

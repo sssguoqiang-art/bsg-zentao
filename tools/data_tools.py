@@ -112,6 +112,7 @@ def _slim_pool(pool: dict, pms: dict, bug_stat: dict, rejected_stat: dict) -> di
         "is_postponed":   bool(pool.get("isPostponed", False)),
         "env":            pool.get("env", "") or "",
         "deadline":       pool.get("deadline", "") or "",
+        "main_deadline":  pool.get("mainDeadline", "") or "",
         "delivery_date":  pool.get("deliveryDate", "") or "",
         "progress":       pool.get("progress", "0") or "0",
         "estimate":       float(pool.get("mainEstimate", 0) or 0),

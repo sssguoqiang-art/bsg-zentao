@@ -28,6 +28,7 @@ from tools.calc_daily import (
     calc_summary, calc_dept_progress, calc_delay_list,
     calc_not_test_list, calc_test_focus, calc_online_bugs,
     calc_rejected_list, calc_next_workload,
+    is_pool_in_version,
 )
 
 log = logging.getLogger(__name__)
@@ -183,6 +184,7 @@ def assemble_daily_report(client: ZentaoClient, project_id: str) -> dict:
     curr_bugs = get_version_bugs(client, curr["id"], project_id)
 
     curr_pools       = [p for p in curr_req["pools"] if p.get("task_status") != "cancel"]
+    curr_pools_in_v  = [p for p in curr_pools if is_pool_in_version(p, curr["end"])]
     curr_task_details = curr_req["task_details"]
     php_member_map   = curr_req["php_member_map"]
     bugs             = curr_bugs["bugs"]
@@ -194,13 +196,13 @@ def assemble_daily_report(client: ZentaoClient, project_id: str) -> dict:
 
     curr_data = {
         "info":          curr,
-        "summary":       calc_summary(curr_pools),
+        "summary":       calc_summary(curr_pools_in_v),
         "dept_progress": _format_dept_progress(dept_progress),
-        "delay_list":    calc_delay_list(curr_pools, curr_task_details, php_member_map, today),
+        "delay_list":    calc_delay_list(curr_pools, curr_task_details, php_member_map, version_end, today),
         "not_test":      calc_not_test_list(curr_pools, curr_task_details, php_member_map, version_end, today),
-        "test_focus":    calc_test_focus(curr_pools, bugs),
+        "test_focus":    calc_test_focus(curr_pools_in_v, bugs),
         "online_bugs":   calc_online_bugs(bugs),
-        "rejected_list": calc_rejected_list(curr_pools),
+        "rejected_list": calc_rejected_list(curr_pools_in_v),
         "review_stat":   curr_req.get("review_stat", {}),
     }
 

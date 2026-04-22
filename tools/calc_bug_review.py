@@ -21,6 +21,7 @@ from collections import Counter
 from datetime import datetime
 from html import unescape
 from typing import Optional
+from urllib.parse import parse_qs, urlparse
 
 import requests
 
@@ -133,6 +134,84 @@ def _extract_story_id_from_url(url: str) -> str:
     return m.group(1) if m else ""
 
 
+def _extract_urls(text: str) -> list[str]:
+    text = text or ""
+    matches = re.findall(r"https?://[-A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%]+", text)
+    urls = []
+    for item in matches:
+        cleaned = item.rstrip(".,;:，。；：）)]}")
+        if cleaned:
+            urls.append(cleaned)
+    return urls
+
+
+def _extract_first_url(text: str) -> str:
+    urls = _extract_urls(text)
+    return urls[0] if urls else ""
+
+
+def _strip_urls(text: str) -> str:
+    text = text or ""
+    for url in _extract_urls(text):
+        text = text.replace(url, " ")
+    text = re.sub(r"\s+", " ", text).strip(" ，,;；：:\n\t")
+    return text
+
+
+def _rewrite_reference_url(url: str) -> str:
+    url = (url or "").strip()
+    if not url:
+        return ""
+
+    parsed = urlparse(url)
+    host = (parsed.netloc or "").lower()
+    path = parsed.path or ""
+
+    if "docs.google.com" not in host:
+        return url
+
+    if path.startswith("/document/d/"):
+        parts = path.split("/")
+        if len(parts) >= 4 and parts[3]:
+            return f"https://docs.google.com/document/d/{parts[3]}/export?format=txt"
+
+    if path.startswith("/spreadsheets/d/"):
+        parts = path.split("/")
+        if len(parts) >= 4 and parts[3]:
+            query = parse_qs(parsed.query)
+            fragment = parse_qs(parsed.fragment)
+            gid = (query.get("gid") or fragment.get("gid") or [""])[0]
+            export_url = f"https://docs.google.com/spreadsheets/d/{parts[3]}/export?format=tsv"
+            if gid:
+                export_url += f"&gid={gid}"
+            return export_url
+
+    return url
+
+
+def _build_reference_display(raw: str, default_label: str, fallback_url: str = "") -> str:
+    raw = (raw or "").strip()
+    url = _extract_first_url(raw) or (fallback_url or "").strip()
+    note = _strip_urls(raw)
+
+    if url:
+        label = default_label
+        if default_label == "关联用例":
+            if "说明文档" in note:
+                label = "说明文档"
+            elif "无用例" in note:
+                label = "关联说明"
+        elif default_label == "关联需求" and "无需求" in note:
+            label = "关联任务"
+
+        link = _format_markdown_link(label, url)
+        if note:
+            return f"{note}；{link}"
+        return link
+
+    return note or raw
+
+
 def _extract_result_from_steps(steps: str) -> str:
     text = _strip_html(steps)
     if not text:
@@ -190,26 +269,39 @@ def _fetch_task_detail(client: ZentaoClient, task_id: str) -> dict:
 
 
 def _fetch_link_preview(client: Optional[ZentaoClient], url: str) -> str:
-    url = (url or "").strip()
-    if not url:
+    raw = (url or "").strip()
+    actual_url = _extract_first_url(raw) or raw
+    actual_url = _rewrite_reference_url(actual_url)
+    if not actual_url:
         return ""
     try:
-        if "cd.baa360.cc:20088" in url and client is not None:
-            resp = client._session.get(url, timeout=20, allow_redirects=True)
+        if "cd.baa360.cc:20088" in actual_url and client is not None:
+            resp = client._session.get(actual_url, timeout=20, allow_redirects=True)
         else:
-            resp = requests.get(url, timeout=20, verify=False, allow_redirects=True)
+            resp = requests.get(actual_url, timeout=20, verify=False, allow_redirects=True)
+        if resp.status_code in (401, 403):
+            return "【链接需要权限，无法读取正文】"
         if resp.status_code != 200:
             return ""
         ctype = resp.headers.get("content-type", "")
-        if "text/html" not in ctype and "text/plain" not in ctype:
+        if (
+            "text/html" not in ctype
+            and "text/plain" not in ctype
+            and "text/tab-separated-values" not in ctype
+            and "text/csv" not in ctype
+            and "application/vnd.ms-excel" not in ctype
+        ):
             return ""
         text = resp.text
+        if "text/plain" in ctype or "tab-separated-values" in ctype or "text/csv" in ctype:
+            return _one_line(_strip_html(text), 600)
         m = re.search(r"<title[^>]*>(.*?)</title>", text, re.I | re.S)
         if m:
             title = _one_line(_strip_html(m.group(1)), 80)
             if title:
-                return title
-        return _one_line(_strip_html(text), 120)
+                body = _one_line(_strip_html(text), 520)
+                return f"{title} {body}".strip()
+        return _one_line(_strip_html(text), 600)
     except Exception:
         return ""
 
@@ -259,6 +351,128 @@ def _humanize_scope(scope: str) -> str:
     return mapping.get(normalized, normalized)
 
 
+def _clean_title_for_match(title: str) -> str:
+    title = re.sub(r"【[^】]*】", " ", title or "")
+    title = re.sub(r"\s+", " ", title).strip()
+    return title
+
+
+def _extract_focus_phrases(*texts: str) -> list[str]:
+    stop_words = {
+        "问题", "功能", "页面", "需求", "用例", "说明文档", "关联需求", "关联用例",
+        "影响范围", "功能位置", "当前", "相关", "优化", "测试点", "说明",
+    }
+    phrases: list[str] = []
+    seen: set[str] = set()
+
+    for text in texts:
+        cleaned = _strip_html(text or "")
+        cleaned = _clean_title_for_match(cleaned)
+        cleaned = re.sub(r"https?://[^\s]+", " ", cleaned)
+        parts = re.split(r"[，。；：:\s、/|（）()【】\[\]\-_]+", cleaned)
+        for part in parts:
+            part = part.strip()
+            if len(part) < 2 or len(part) > 24:
+                continue
+            if part in stop_words:
+                continue
+            if part not in seen:
+                seen.add(part)
+                phrases.append(part)
+    return phrases
+
+
+def _describe_bug_detail(phenomenon: str, scope: str) -> str:
+    if not phenomenon or phenomenon == "【空】":
+        return "Bug现象字段不完整，当前只能先按标题和上下文做初判。"
+    if not scope:
+        return "现象已能定位到具体问题点，但影响范围描述还不够完整，复盘时建议补一层业务影响。"
+    if any(kw in scope for kw in ["玩家可感知", "用户可感知"]):
+        return "该问题对用户侧可感知，虽然不一定阻断流程，但已经具备复盘价值。"
+    if "不影响核心流程" in scope or "暂时不影响核心流程" in scope:
+        return "该问题对用户侧可感知，但当前看起来还没有阻断核心流程。"
+    if any(kw in scope for kw in ["核心流程", "严重影响", "无法使用"]):
+        return "该问题已影响核心流程，优先按真实 Bug 视角处理。"
+    if any(kw in scope for kw in ["后台", "展示", "核对", "影响较小", "局部"]):
+        return "该问题更偏局部功能或展示核对异常，影响面相对可控。"
+    return "从现象和影响范围看，这条问题已经具备进入界定的基础信息。"
+
+
+def _assess_demand_alignment(
+    *,
+    phenomenon: str,
+    bug_title: str,
+    raw_demand: str,
+    task_title: str,
+    task_context: str,
+    demand_context: str,
+) -> tuple[str, str]:
+    ref_text = " ".join(part for part in [task_title, task_context, demand_context] if part).strip()
+    demand_note = _strip_urls(raw_demand)
+    issue_phrases = _extract_focus_phrases(phenomenon, _clean_title_for_match(bug_title))
+    hits = [p for p in issue_phrases if len(p) >= 3 and p in ref_text]
+
+    if not raw_demand and not ref_text:
+        return ("当前未挂关联需求或任务，暂无法判断产品是否明确到这个修改点。", "missing")
+
+    if demand_note and any(flag in demand_note for flag in ["无需求", "无单子", "未有关联需求"]):
+        if ref_text:
+            return ("当前没有正式需求单，但能找到关联任务链路；从任务正文看，这个问题更像处理相关需求时暴露出的额外点，需警惕需求边界未写清。", "related")
+        return ("当前没有正式需求单，无法直接判断产品是否明确写到这个修改点。", "missing")
+
+    if not ref_text:
+        return ("已挂需求链接，但当前没拿到可用于对照的需求正文，暂无法判断需求是否覆盖到这个修改点。", "missing")
+
+    if len(hits) >= 2:
+        joined = "、".join(hits[:3])
+        return (f"需求正文里已能对上关键点（{joined}），说明产品侧对这个修改点有明确描述，更需要进一步确认是开发没做还是实现做错。", "explicit")
+    if len(hits) == 1:
+        return (f"需求链路与当前问题相关，且正文里提到了“{hits[0]}”，但还看不出是否把这个测试点写得足够细，需结合实现口径再判。", "partial")
+    if task_title:
+        return (f"当前能确认这条 Bug 属于《{_one_line(task_title, 24)}》这条需求链路，但从已抓到的需求正文里，还没看到直接写到这个修改点，更像需求相关但边界未明确。", "related")
+    return ("已挂需求链接，但正文里没看到直接对应这个修改点的描述，需警惕产品漏写或边界未说明。", "related")
+
+
+def _assess_use_case_coverage(
+    *,
+    phenomenon: str,
+    bug_title: str,
+    raw_use_case: str,
+    use_case_context: str,
+    task_title: str,
+    demand_signal: str,
+) -> tuple[str, str]:
+    use_case_note = _strip_urls(raw_use_case)
+    issue_phrases = _extract_focus_phrases(phenomenon, _clean_title_for_match(bug_title))
+    demand_phrases = _extract_focus_phrases(task_title)
+    issue_hits = [p for p in issue_phrases if len(p) >= 3 and p in use_case_context]
+    demand_hits = [p for p in demand_phrases if len(p) >= 3 and p in use_case_context]
+
+    if not raw_use_case:
+        return ("当前没有关联用例，无法判断测试是否覆盖到这个测试点。", "missing")
+
+    if "无用例" in use_case_note:
+        if use_case_context:
+            return ("字段里已明确写了“无用例”，当前附带的更像说明文档而不是正式测试用例，因此不能据此认定测试已覆盖这个测试点。", "no_case")
+        return ("字段里已明确写了“无用例”，当前没有正式用例可供核对，测试覆盖情况无法成立。", "no_case")
+
+    if not use_case_context:
+        return ("已挂关联用例链接，但当前无法读取正文内容，暂时无法判断用例有没有覆盖到这个测试点。", "unreadable")
+
+    if "【链接需要权限，无法读取正文】" in use_case_context:
+        return ("已挂关联用例链接，但该链接需要权限，当前没法读到用例正文，所以暂时无法判断是否覆盖到这个测试点。", "unreadable")
+
+    if issue_hits:
+        joined = "、".join(issue_hits[:3])
+        return (f"用例正文里能直接对上测试点（{joined}），说明测试至少有覆盖到这一块；后续更应判断是执行漏测，还是结果校验没拦住。", "covered")
+
+    if demand_hits or demand_signal in {"explicit", "partial", "related"}:
+        hit_text = f"（已命中：{'、'.join(demand_hits[:2])}）" if demand_hits else ""
+        return (f"用例与这条需求链路有关{hit_text}，但当前正文里还没看到直接覆盖这个问题测试点的描述，更像只覆盖了主流程，未明显覆盖到细分校验点。", "related")
+
+    return ("当前拿到的用例正文里没看到和这个问题直接对应的测试点，倾向于未明显覆盖到该场景；若测试认为已覆盖，需要补充具体用例步骤佐证。", "not_found")
+
+
 def _split_responsibility(dept_names: list[str]) -> tuple[str, str, str]:
     seen = set()
     ordered = []
@@ -287,10 +501,50 @@ def _split_responsibility(dept_names: list[str]) -> tuple[str, str, str]:
     return primary_str, secondary_str, "、".join([p for p in label_parts if p])
 
 
+def _normalize_test_resp_label(primary_resp: str, secondary_resp: str, raw_test_resp: str) -> str:
+    test_names = {"测试组", "测试部"}
+    if primary_resp in test_names and not secondary_resp:
+        return ""
+    if secondary_resp:
+        return "次责"
+    if raw_test_resp == " + 测试次责":
+        return "次责"
+    if raw_test_resp == "；测试不担责":
+        return "不担责"
+    if raw_test_resp == "；测试责任待定":
+        return "待定"
+    return ""
+
+
+def _compose_ext_responsibility_label(primary_resp: str, test_resp_label: str) -> str:
+    base = primary_resp or "待确认"
+    if not test_resp_label:
+        return base
+    if test_resp_label == "次责":
+        return f"{base} + 测试次责"
+    if test_resp_label == "不担责":
+        return f"{base}（测试不担责）"
+    if test_resp_label == "待定":
+        return f"{base}（测试待定）"
+    return f"{base}（测试责任：{test_resp_label}）"
+
+
 def _determine_bug_status(review_rec: str) -> str:
     if review_rec == "复盘价值有限":
         return "待确认"
     return "是"
+
+
+def _has_explicit_nonbug_marker(b: dict) -> bool:
+    """
+    仅认禅道里明确的“非Bug”标识。
+
+    当前口径只看 bug.type == "performance"。
+    resolution=tostory/external/bydesign 只能说明当前处理结果或争议状态，
+    不能直接当成“非Bug标识”把数据放进外部非Bug列表。
+    """
+    bug_type = (b.get("type") or "").strip()
+    return bug_type == "performance"
 
 
 def _build_exclude_reason(b: dict, cause: str) -> str:
@@ -301,6 +555,10 @@ def _build_exclude_reason(b: dict, cause: str) -> str:
     res = b.get("resolution", "")
     title = b.get("title", "")
 
+    if res == "tostory":
+        return "该问题已转为需求处理，按需求项跟踪，不纳入 Bug 复盘。"
+    if res == "external":
+        return "该问题当前判定为外部原因或环境因素，不纳入 Bug 复盘。"
     if res == "bydesign":
         return "该问题属于设计如此或体验调整，不纳入 Bug 复盘。"
     if "performance" in (b.get("type") or ""):
@@ -314,6 +572,7 @@ def _build_exclude_reason(b: dict, cause: str) -> str:
 
 def _build_decision_reason(
     *,
+    bug_title: str,
     phenomenon: str,
     scope: str,
     cause: str,
@@ -321,49 +580,43 @@ def _build_decision_reason(
     review_rec: str,
     demand: str,
     use_case: str,
+    raw_demand: str = "",
+    raw_use_case: str = "",
     resolution: str = "",
     primary_resp: str = "",
     secondary_resp: str = "",
+    test_resp_label: str = "",
     task_title: str = "",
     task_context: str = "",
     demand_context: str = "",
     use_case_context: str = "",
 ) -> str:
-    evidence_parts = []
-    if phenomenon and phenomenon != "【空】":
-        evidence_parts.append(f"Bug详情现象：{_one_line(phenomenon, 40)}")
-    if scope:
-        evidence_parts.append(f"影响范围：{_one_line(_humanize_scope(scope), 24)}")
-    if task_title:
-        evidence_parts.append(f"已挂关联需求：《{_one_line(task_title, 28)}》")
-    elif demand:
-        evidence_parts.append("已挂关联需求")
-    if use_case:
-        evidence_parts.append("已挂关联用例")
-    if not _is_cause_invalid(cause):
-        evidence_parts.append(f"原因记录：{_one_line(cause, 42)}")
-    if resolution in {"tostory", "external", "bydesign"}:
-        resolution_map = {
-            "tostory": "当前处理结果：转需求",
-            "external": "当前处理结果：外部原因",
-            "bydesign": "当前处理结果：设计如此",
-        }
-        evidence_parts.append(resolution_map[resolution])
+    detail_note = _describe_bug_detail(phenomenon, scope)
+    demand_note, demand_signal = _assess_demand_alignment(
+        phenomenon=phenomenon,
+        bug_title=bug_title,
+        raw_demand=raw_demand,
+        task_title=task_title,
+        task_context=task_context,
+        demand_context=demand_context,
+    )
+    use_case_note, use_case_signal = _assess_use_case_coverage(
+        phenomenon=phenomenon,
+        bug_title=bug_title,
+        raw_use_case=raw_use_case,
+        use_case_context=use_case_context,
+        task_title=task_title,
+        demand_signal=demand_signal,
+    )
 
     owner_hint = "责任归属待确认。"
-    if primary_resp and primary_resp != "待确认":
+    if primary_resp:
         owner_hint = f"当前建议主责：{primary_resp}"
         if secondary_resp:
             owner_hint += f"；次责：{secondary_resp}"
+        elif test_resp_label:
+            owner_hint += f"；测试责任：{test_resp_label}"
         owner_hint += "。"
-
-    context_text = ""
-    if task_context:
-        context_text = "关联需求内容显示该问题位于对应功能链路中。"
-    elif demand_context:
-        context_text = "已挂需求链接内容可支持该问题与需求链路存在关联。"
-    elif use_case_context:
-        context_text = "关联用例信息可作为该问题验证范围的辅助依据。"
 
     cause_short = _one_line(cause, 36) if not _is_cause_invalid(cause) else ""
     if dispute_reason:
@@ -383,24 +636,62 @@ def _build_decision_reason(
         ai_judgment = f"原因记录指向“{cause_short}”，但当前处理结果为外部原因，说明系统自身缺陷证据不足；复盘时建议先确认是否属于外部数据或环境问题。"
     elif resolution == "bydesign":
         ai_judgment = f"原因记录指向“{cause_short}”，且当前记录为设计如此，说明问题更可能落在需求或产品口径；复盘时建议先确认是否属于预期行为。"
-    elif task_context:
-        ai_judgment = f"原因记录指向“{cause_short}”，且已挂需求内容与当前功能链路一致，这条更像实现遗漏或逻辑异常，可按复盘 Bug 跟进。"
-    elif demand_context:
-        ai_judgment = f"原因记录指向“{cause_short}”，且已挂需求与当前现象直接相关，这条可按复盘 Bug 跟进。"
-    elif use_case_context:
-        ai_judgment = f"原因记录指向“{cause_short}”，且关联用例可作为验证依据，这条问题可按复盘 Bug 跟进。"
+    elif demand_signal == "explicit":
+        ai_judgment = f"原因记录指向“{cause_short}”，且需求对这个修改点写得比较明确，这条更像实现遗漏或实现错误，可按复盘 Bug 跟进。"
+    elif use_case_signal == "covered":
+        ai_judgment = f"原因记录指向“{cause_short}”，且用例已覆盖到该测试点，这条更需要追问测试执行和结果校验是否失守。"
+    elif demand_signal in {"partial", "related"} and use_case_signal in {"related", "not_found", "missing", "unreadable", "no_case"}:
+        ai_judgment = "需求链路能对上，但需求边界或用例覆盖都不够扎实，这条更适合在复盘里同时核需求明确性和测试覆盖性。"
     else:
         ai_judgment = f"原因记录指向“{cause_short}”，与当前现象能够对上，这条更像实际功能异常或实现遗漏，可按复盘 Bug 跟进。"
 
     lines = []
-    if evidence_parts:
-        lines.append("证据摘要：")
-        for idx, part in enumerate(evidence_parts[:5], 1):
-            lines.append(f"{idx}. {part}")
-    if context_text:
-        lines.append(f"辅助信息：{context_text}")
-    lines.append(f"AI判断：{ai_judgment}")
-    lines.append(f"归属建议：{owner_hint}")
+    lines.append("一、Bug详情判断：")
+    detail_items = [
+        f"现象：{_one_line(phenomenon or '【空】', 60)}",
+        f"影响范围：{_one_line(_humanize_scope(scope) or '【空】', 40)}",
+    ]
+    if not _is_cause_invalid(cause):
+        detail_items.append(f"原因记录：{_one_line(cause, 42)}")
+    if resolution in {"tostory", "external", "bydesign"}:
+        resolution_map = {
+            "tostory": "当前处理结果：转需求",
+            "external": "当前处理结果：外部原因",
+            "bydesign": "当前处理结果：设计如此",
+        }
+        detail_items.append(resolution_map[resolution])
+    detail_items.append(f"判断：{detail_note}")
+    for idx, item in enumerate(detail_items, 1):
+        lines.append(f"{idx}. {item}")
+    lines.append("")
+
+    lines.append("二、需求对照：")
+    demand_items = []
+    if task_title:
+        demand_items.append(f"关联需求：{_one_line(task_title, 40)}")
+    elif demand:
+        demand_items.append("关联需求：已挂需求/任务链接")
+    else:
+        demand_items.append("关联需求：无")
+    demand_items.append(f"判断：{demand_note}")
+    for idx, item in enumerate(demand_items, 1):
+        lines.append(f"{idx}. {item}")
+    lines.append("")
+
+    lines.append("三、用例对照：")
+    use_case_items = []
+    if raw_use_case:
+        use_case_items.append("关联用例：已挂用例/说明链接")
+    else:
+        use_case_items.append("关联用例：无")
+    use_case_items.append(f"判断：{use_case_note}")
+    for idx, item in enumerate(use_case_items, 1):
+        lines.append(f"{idx}. {item}")
+    lines.append("")
+
+    lines.append("四、综合判断：")
+    lines.append(f"1. AI判断：{ai_judgment}")
+    lines.append(f"2. 归属建议：{owner_hint}")
     return "\n".join(lines)
 
 
@@ -451,7 +742,7 @@ def _summarize_task_context(task_detail: dict) -> tuple[str, str]:
     ]
     merged = " ".join(part for part in parts if part)
     merged = re.sub(r"\s{2,}", " ", merged).strip()
-    return title, _one_line(merged, 180)
+    return title, _one_line(merged, 320)
 
 
 def _enrich_bug_context(
@@ -468,8 +759,10 @@ def _enrich_bug_context(
 
     source = {**bug, **detail}
 
-    demand_url = (source.get("demand") or "").strip()
-    use_case_url = (source.get("useCase") or "").strip()
+    raw_demand = (source.get("demand") or "").strip()
+    raw_use_case = (source.get("useCase") or "").strip()
+    demand_url = _extract_first_url(raw_demand)
+    use_case_url = _extract_first_url(raw_use_case)
     task_id, task_name = _get_task_ref(source)
     if not task_id and demand_url:
         task_id = _extract_task_id_from_url(demand_url)
@@ -484,21 +777,24 @@ def _enrich_bug_context(
     demand_display = ""
     demand_context = ""
     if demand_url:
-        demand_display = _format_markdown_link(task_label or "关联需求", demand_url)
+        demand_display = _build_reference_display(raw_demand, task_label or "关联需求", fallback_url=task_url(task_id) if task_id else "")
         if not task_context:
             if demand_url not in link_preview_cache:
-                link_preview_cache[demand_url] = _fetch_link_preview(client, demand_url)
+                link_preview_cache[demand_url] = _fetch_link_preview(client, raw_demand)
             demand_context = link_preview_cache.get(demand_url, "")
     elif task_id:
-        demand_display = _format_markdown_link(task_label or "关联需求", task_url(task_id))
+        demand_display = _build_reference_display(raw_demand, task_label or "关联需求", fallback_url=task_url(task_id))
+    elif raw_demand:
+        demand_display = _build_reference_display(raw_demand, "关联需求")
 
     use_case_display = ""
     use_case_context = ""
-    if use_case_url:
-        use_case_display = _format_markdown_link("关联用例", use_case_url)
-        if use_case_url not in link_preview_cache:
-            link_preview_cache[use_case_url] = _fetch_link_preview(client, use_case_url)
-        use_case_context = link_preview_cache.get(use_case_url, "")
+    if raw_use_case:
+        use_case_display = _build_reference_display(raw_use_case, "关联用例")
+        if use_case_url:
+            if use_case_url not in link_preview_cache:
+                link_preview_cache[use_case_url] = _fetch_link_preview(client, raw_use_case)
+            use_case_context = link_preview_cache.get(use_case_url, "")
 
     steps = (source.get("steps") or "").strip()
 
@@ -509,6 +805,8 @@ def _enrich_bug_context(
         "task_context": task_context,
         "demand_context": demand_context,
         "use_case_context": use_case_context,
+        "raw_demand": raw_demand,
+        "raw_use_case": raw_use_case,
         "phenomenon": _resolve_phenomenon(source, _get_cause(source), steps),
         "scope": _resolve_scope(source, _get_cause(source)),
         "demand_display": demand_display,
@@ -569,7 +867,9 @@ def render_bug_review_markdown(report: dict) -> str:
             W(f"- 缺陷等级：{item['severity_label']}")
             W(f"- 是否Bug（AI预判）：{item['is_bug']}")
             resp = f"主责：{item['primary_resp']}"
-            if item['secondary_resp']:
+            if item.get("test_resp_label"):
+                resp += f"；测试责任：{item['test_resp_label']}"
+            elif item['secondary_resp']:
                 resp += f"；次责：{item['secondary_resp']}"
             W(f"- 责任归属（AI预判）：{resp}")
             W("- 判定理由（AI生成）：")
@@ -770,8 +1070,6 @@ def _test_responsibility(b: dict, dispute_reason: str, dept_names: list) -> str:
         return "；测试不担责"
     if btp == "2" or "转需求" in cause:
         return "；测试不担责"
-    if not dept_names:
-        return "；测试责任待定"
     return " + 测试次责"
 
 
@@ -914,11 +1212,20 @@ def calc_bug_review(
     link_preview_cache: dict[str, str] = {}
 
     # ── 非Bug分流 ──────────────────────────────────────────────────────────────
+    # 只有显式非Bug标识（当前仅 type=performance）才进入“外部非Bug列表”。
+    ext_nonbug_candidates = [
+        b for b in bugs
+        if b.get("classification") in ("1", "2") and _has_explicit_nonbug_marker(b)
+    ]
+    ext_nonbug_ids = {str(b.get("id", "")) for b in ext_nonbug_candidates}
     all_perf = [b for b in bugs if b.get("type") == "performance"]
     non_perf = [b for b in bugs if b.get("type") != "performance"]
 
-    ext_perf   = [b for b in all_perf  if b.get("classification") in ("1", "2")]
-    ext_review = [b for b in non_perf  if b.get("classification") in ("1", "2")]
+    ext_perf   = ext_nonbug_candidates
+    ext_review = [
+        b for b in non_perf
+        if b.get("classification") in ("1", "2") and str(b.get("id", "")) not in ext_nonbug_ids
+    ]
     int_bugs   = [b for b in non_perf  if b.get("classification") in ("4", "5")]
     int_review = [b for b in int_bugs
                   if b.get("severity") in ("1", "2") or b.get("isTypical") == "1"]
@@ -961,6 +1268,9 @@ def calc_bug_review(
         dispute_reason, review_rec = _predict_dispute(source_bug, dnames, cause)
         ctype  = _classify_type(source_bug, dispute_reason, cause)
         primary_resp, secondary_resp, responsibility_label = _split_responsibility(dnames)
+        raw_test_resp = _test_responsibility(source_bug, dispute_reason, dnames)
+        test_resp_label = _normalize_test_resp_label(primary_resp, secondary_resp, raw_test_resp)
+        ext_responsibility_label = _compose_ext_responsibility_label(primary_resp, test_resp_label)
         use_mid, use_mname = _get_task_ref(source_bug)
         phenomenon = ctx["phenomenon"]
         severity_label = _severity_display(source_bug)
@@ -968,6 +1278,7 @@ def calc_bug_review(
         use_case = ctx["use_case_display"]
         is_bug = _determine_bug_status(review_rec)
         judgment_reason = _build_decision_reason(
+            bug_title=source_bug.get("title", ""),
             phenomenon=phenomenon,
             scope=ctx["scope"],
             cause=cause,
@@ -975,9 +1286,12 @@ def calc_bug_review(
             review_rec=review_rec,
             demand=demand,
             use_case=use_case,
+            raw_demand=ctx["raw_demand"],
+            raw_use_case=ctx["raw_use_case"],
             resolution=source_bug.get("resolution", ""),
             primary_resp=primary_resp,
             secondary_resp=secondary_resp,
+            test_resp_label=test_resp_label,
             task_title=ctx["task_title"],
             task_context=ctx["task_context"],
             demand_context=ctx["demand_context"],
@@ -989,7 +1303,7 @@ def calc_bug_review(
             "link":                f"[{bid} {source_bug.get('title', '')}]({bug_url(bid)})",
             "severity_label":      severity_label,
             "phenomenon":          _one_line(phenomenon or "【空】", 80),
-            "responsibility_label": responsibility_label,
+            "responsibility_label": ext_responsibility_label,
         })
 
         ext_analyzed.append({
@@ -1002,7 +1316,8 @@ def calc_bug_review(
             "is_bug":          is_bug,
             "primary_resp":    primary_resp,
             "secondary_resp":  secondary_resp,
-            "responsibility_label": responsibility_label,
+            "test_resp_label": test_resp_label,
+            "responsibility_label": ext_responsibility_label,
             "cause":           cause[:80] if not _is_cause_invalid(cause) else "【空】",
             "impact":          ctx["scope"],
             "cls_type":        ctype,
@@ -1038,6 +1353,7 @@ def calc_bug_review(
         use_case = ctx["use_case_display"]
         is_bug = _determine_bug_status(review_rec)
         judgment_reason = _build_decision_reason(
+            bug_title=source_bug.get("title", ""),
             phenomenon=phenomenon,
             scope="",
             cause=cause,
@@ -1045,6 +1361,8 @@ def calc_bug_review(
             review_rec=review_rec,
             demand=demand,
             use_case=use_case,
+            raw_demand=ctx["raw_demand"],
+            raw_use_case=ctx["raw_use_case"],
             resolution=source_bug.get("resolution", ""),
             primary_resp=primary_resp,
             secondary_resp=secondary_resp,
