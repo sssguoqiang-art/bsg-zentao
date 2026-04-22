@@ -18,7 +18,7 @@ Bug 复盘预分类计算逻辑。
 
 import re
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 from html import unescape
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
@@ -110,6 +110,35 @@ def _one_line(text: str, limit: int = 80) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + "…"
+
+
+def _to_float(value) -> float:
+    try:
+        return float(str(value or "").strip() or 0)
+    except Exception:
+        return 0.0
+
+
+def _parse_date(value: str):
+    text = str(value or "").strip()
+    if not text or text.startswith("0000-00-00"):
+        return None
+    try:
+        return datetime.strptime(text[:10], "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def _dedupe_keep_order(items: list[str]) -> list[str]:
+    seen = set()
+    ordered = []
+    for item in items:
+        item = (item or "").strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        ordered.append(item)
+    return ordered
 
 
 def _strip_html(text: str) -> str:
@@ -220,6 +249,8 @@ def _describe_use_case_reference(raw_use_case: str) -> str:
     note = _strip_urls(raw_use_case)
     if not raw_use_case:
         return "无"
+    if "无关联用例" in note:
+        return "没有用例"
     if "无法溯源" in note:
         return "仅有文字记录，无可打开链接"
     if "无用例" in note and "说明文档" in note:
@@ -233,6 +264,8 @@ def _describe_use_case_coverage(signal: str, raw_use_case: str) -> str:
     note = _strip_urls(raw_use_case)
     if not raw_use_case:
         return "无"
+    if "无关联用例" in note:
+        return "没有用例"
     if "无法溯源" in note:
         return "无法判断（没有可打开的正式用例）"
     if "无用例" in note and "说明文档" in note:
@@ -278,6 +311,248 @@ def _extract_result_from_steps(steps: str) -> str:
         if len(line) >= 8:
             return _one_line(line, 80)
     return ""
+
+
+def _looks_like_noise_phenomenon(text: str) -> bool:
+    text = (text or "").strip()
+    if not text:
+        return True
+    if re.search(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", text):
+        return True
+    if re.fullmatch(r"[\d\s]+", text):
+        return True
+    if any(kw in text for kw in ["哪套、哪个平台", "哪个环境", "fgfghre@gmail.com", "123456"]):
+        return True
+    return False
+
+
+def _normalize_phenomenon_text(text: str) -> str:
+    text = _strip_html(text or "")
+    text = text.replace("问题描述：", "").replace("问题描述:", "")
+    text = text.replace("功能位置：", "").replace("功能位置:", "")
+    text = re.sub(r"\s+", " ", text).strip(" ：:;；，,")
+    return _one_line(text, 80)
+
+
+def _clean_step_issue_line(line: str) -> str:
+    line = _strip_html(line or "")
+    line = re.sub(r"^[0-9]+[.、:\s]+", "", line).strip()
+    line = re.sub(r"\s+", " ", line).strip(" ：:;；，,")
+    if not line:
+        return ""
+    if _looks_like_noise_phenomenon(line):
+        return ""
+    if any(kw in line for kw in ["哪套、哪个平台", "哪个环境", "交付环境", "前置条件", "设备：", "版本："]):
+        return ""
+    if line in {"交付", "环境", "前置条件", "[步骤]", "[结果]", "[期望]"}:
+        return ""
+    if line.startswith("正确应该"):
+        return ""
+    if line.startswith("原型中有"):
+        return "缺少" + line.removeprefix("原型中有")
+    if "原型中是" in line or "与原型不一致" in line:
+        prefix = re.split(r"原型中是|与原型不一致", line)[0].strip(" ：:")
+        if prefix:
+            return f"{prefix}与原型不一致"
+        return "页面展示与原型不一致"
+    return line
+
+
+def _title_context_for_phenomenon(title: str) -> str:
+    clean = _clean_title_for_match(title)
+    clean = re.sub(r"问题排查处理|数据有问题|页面问题|问题$", "", clean).strip(" ，,")
+    clean = re.sub(r"(异常|错误)$", "", clean).strip(" ，,")
+    clean = clean.replace("  ", " ").strip()
+    return clean
+
+
+def _rewrite_title_to_phenomenon(title: str) -> str:
+    raw_title = title or ""
+    clean = _clean_title_for_match(raw_title)
+    if not clean:
+        return ""
+
+    tags = [tag.strip() for tag in re.findall(r"【([^】]+)】", raw_title) if tag.strip() and "Bug" not in tag]
+    m = re.search(r"(.+?)等于1天，显示成days", clean)
+    if m:
+        prefix = m.group(1).strip(" ，,")
+        if not prefix:
+            prefix = tags[-1] if tags else ""
+        clean = f"{prefix}配置为1天时显示成 days"
+    elif clean.startswith("等于1天，显示成days"):
+        prefix = tags[-1] if tags else ""
+        clean = f"{prefix}配置为1天时显示成 days" if prefix else "配置为1天时显示成 days"
+    clean = clean.replace("没配置", "未配置")
+    clean = clean.replace("显示这个符号", "显示对应标识")
+    clean = clean.replace("点击后显示空白", "点击后出现空白")
+    clean = clean.replace("搜索出两个一样的结果", "搜索结果出现两个相同结果")
+
+    if "页面问题" in clean:
+        context = _title_context_for_phenomenon(clean)
+        if context:
+            return _one_line(f"{context}存在多个展示或交互异常", 80)
+    if "数据有问题" in clean:
+        context = _title_context_for_phenomenon(clean)
+        if context:
+            return _one_line(f"{context}存在数据异常", 80)
+    return _one_line(clean, 80)
+
+
+def _extract_phenomenon_from_steps(steps: str, title: str = "") -> str:
+    text = _strip_html(steps)
+    if not text:
+        return ""
+
+    body = re.split(r"\[结果\]|\[期望\]", text)[0]
+    lines = [line.strip() for line in body.splitlines() if line.strip()]
+    issues: list[str] = []
+    context = ""
+
+    for raw in lines:
+        raw = raw.strip()
+        if raw.startswith("功能位置：") or raw.startswith("功能位置:"):
+            context = raw.split("：", 1)[-1].split(":", 1)[-1].strip()
+            continue
+        if raw.startswith("问题描述：") or raw.startswith("问题描述:"):
+            issue = _clean_step_issue_line(raw.split("：", 1)[-1].split(":", 1)[-1])
+            if issue:
+                issues.append(issue)
+            continue
+        issue = _clean_step_issue_line(raw)
+        if not issue:
+            continue
+        if any(issue == existing or issue in existing for existing in issues):
+            continue
+        issues.append(issue)
+
+    issues = _dedupe_keep_order(issues)
+    issue_markers = ["异常", "错误", "空白", "不一致", "对不上", "缺少", "未", "没有", "还是", "显示", "遮挡", "重复", "无法", "数据"]
+    if len(issues) >= 2 and not any(marker in issues[0] for marker in issue_markers):
+        issues = issues[1:]
+    if not issues:
+        return ""
+
+    if len(issues) == 1:
+        issue = issues[0]
+        if context and context not in issue and not any(part and part in issue for part in re.split(r"[-/]", context) if len(part) >= 3):
+            return _one_line(f"{context}中{issue}", 80)
+        return _one_line(issue, 80)
+
+    title_context = _title_context_for_phenomenon(title)
+    prefix = title_context or context
+    issue_text = "；".join(issues[:3])
+    if prefix:
+        return _one_line(f"{prefix}存在多个问题：{issue_text}", 80)
+    return _one_line(issue_text, 80)
+
+
+def _phenomenon_context_label(*texts: str) -> str:
+    for raw in texts:
+        text = _title_context_for_phenomenon(raw or "")
+        text = re.sub(r"(存在多个问题|页面问题|数据有问题|问题排查处理|问题)$", "", text).strip(" ，,")
+        text = re.sub(r"\s+", " ", text).strip()
+        if text:
+            return text
+    return ""
+
+
+def _page_like_context(text: str) -> str:
+    text = (text or "").strip()
+    if not text:
+        return ""
+    if text.endswith(("页面", "页", "报表", "列表", "弹窗")):
+        return text
+    return f"{text}页面"
+
+
+def _pick_primary_clause(clauses: list[str]) -> str:
+    def score(text: str) -> int:
+        scoring = [
+            ("无法", 100),
+            ("失败", 95),
+            ("空白", 90),
+            ("错误", 85),
+            ("异常", 80),
+            ("不一致", 78),
+            ("对不上", 76),
+            ("未回到顶部", 74),
+            ("被遮挡", 72),
+            ("缺少", 68),
+            ("显示", 60),
+        ]
+        best = 0
+        for kw, value in scoring:
+            if kw in text:
+                best = max(best, value)
+        return best
+
+    ordered = sorted(
+        ((score(clause), idx, clause) for idx, clause in enumerate(clauses)),
+        key=lambda item: (-item[0], item[1]),
+    )
+    return ordered[0][2] if ordered else ""
+
+
+def _condense_phenomenon(text: str, title: str = "") -> str:
+    text = _normalize_phenomenon_text(text)
+    if not text:
+        return ""
+
+    text = text.replace("点击后出现空白游戏列表", "点击后为空白列表")
+    text = text.replace("点击后显示空白游戏列表", "点击后为空白列表")
+    text = text.replace("显示对应标识", "显示入口")
+    text = text.replace("无法保存成功", "无法保存")
+    text = text.replace("部分banner", "部分 banner")
+    text = text.replace("banner被", "banner 被")
+    text = text.replace("配置为1天时", "配置 1 天时")
+    text = text.replace("显示成 days", "文案显示成 days")
+    text = text.replace("活动配置页面", "活动配置页")
+    text = text.replace("门票兑换免费旋转次数的打码倍数配置", "免费旋转打码倍数")
+    text = re.sub(r"^.+?后，刷新(?:大厅)?(?:页面)?，未回到顶部，", "刷新页面后未回到顶部，", text)
+    text = re.sub(
+        r"^(.+?)的统计与(?:具体)?活动(?:记录)?统计的数据对不上.*$",
+        r"\1与活动统计数据不一致",
+        text,
+    )
+    text = re.sub(
+        r"^免费旋转，未配置免费旋转次数也显示入口，点击后为空白列表$",
+        "未配置免费旋转次数时仍显示免费旋转入口，点击后为空白列表",
+        text,
+    )
+
+    prefix = ""
+    issue_text = text
+    if "存在多个问题：" in text:
+        prefix, issue_text = text.split("存在多个问题：", 1)
+    elif "存在多个问题:" in text:
+        prefix, issue_text = text.split("存在多个问题:", 1)
+    clauses = _dedupe_keep_order([part.strip(" ，,") for part in re.split(r"[；;]", issue_text) if part.strip(" ，,")])
+    context = _phenomenon_context_label(prefix, title, text)
+
+    if len(clauses) > 1:
+        if any("发送成功人数" in clause for clause in clauses) and ("登录人数" in text or "登录人数" in title):
+            return "发送记录中的发送成功人数和登录人数统计不一致"
+
+        has_proto_mismatch = any("与原型不一致" in clause for clause in clauses)
+        has_missing = any(clause.startswith("缺少") for clause in clauses)
+        if has_proto_mismatch and has_missing:
+            return _one_line(f"{_page_like_context(context)}字段缺失，展示与原型不一致", 40)
+        if has_proto_mismatch and context:
+            return _one_line(f"{_page_like_context(context)}展示与原型不一致", 40)
+
+        if any(any(flag in clause for flag in ["对不上", "不一致", "统计是0", "统计进去了"]) for clause in clauses):
+            if context and any(word in context for word in ["报表", "统计", "人数", "记录"]):
+                if context.endswith("数据"):
+                    return _one_line(f"{context}不一致", 40)
+                return _one_line(f"{context}统计异常", 40)
+
+        primary = _pick_primary_clause(clauses)
+        if primary:
+            if context and context not in primary and not primary.startswith(("刷新", "未配置", "配置", "点击")):
+                return _one_line(f"{context}{primary}", 40)
+            return _one_line(primary, 40)
+
+    return _one_line(text, 40)
 
 
 def _fetch_bug_detail(client: ZentaoClient, bug_id: str) -> dict:
@@ -352,12 +627,21 @@ def _severity_display(b: dict) -> str:
 
 def _resolve_phenomenon(b: dict, cause: str, steps: str = "") -> str:
     phe = (b.get("phenomenon") or "").strip()
-    if phe:
-        return phe
-    step_result = _extract_result_from_steps(steps)
+    step_result = _extract_phenomenon_from_steps(steps, b.get("title", ""))
+    if phe and not _looks_like_noise_phenomenon(phe):
+        phe = _normalize_phenomenon_text(phe)
+        if step_result and len(step_result) >= len(phe) + 6:
+            return _condense_phenomenon(step_result, b.get("title", ""))
+        return _condense_phenomenon(phe, b.get("title", ""))
     if step_result:
-        return step_result
-    return _infer_phenomenon(b, cause)
+        return _condense_phenomenon(step_result, b.get("title", ""))
+    step_result = _extract_result_from_steps(steps)
+    if step_result and not _looks_like_noise_phenomenon(step_result):
+        return _condense_phenomenon(step_result, b.get("title", ""))
+    title_result = _rewrite_title_to_phenomenon(b.get("title", ""))
+    if title_result:
+        return _condense_phenomenon(title_result, b.get("title", ""))
+    return _condense_phenomenon(_infer_phenomenon(b, cause), b.get("title", ""))
 
 
 def _resolve_scope(b: dict, cause: str) -> str:
@@ -490,6 +774,9 @@ def _assess_use_case_coverage(
 
     if not raw_use_case:
         return ("当前没有关联用例，无法判断测试是否覆盖到这个测试点。", "missing")
+
+    if "无关联用例" in use_case_note:
+        return ("当前没有正式用例，无法判断测试是否覆盖到这个测试点。", "missing")
 
     if "无法溯源" in use_case_note:
         return ("字段里只有“无法溯源”这类文字记录，没有可点击的正式用例链接，因此当前无法点进去核对测试是否覆盖到这个测试点。", "untraceable")
@@ -798,7 +1085,11 @@ def _enrich_bug_context(
         bug_detail_cache[bid] = _fetch_bug_detail(client, bid)
     detail = bug_detail_cache.get(bid) or {}
 
-    source = {**bug, **detail}
+    source = dict(bug)
+    for key, value in detail.items():
+        if value in (None, "", [], {}, "0"):
+            continue
+        source[key] = value
 
     raw_demand = (source.get("demand") or "").strip()
     raw_use_case = (source.get("useCase") or "").strip()
@@ -868,6 +1159,7 @@ def render_bug_review_markdown(report: dict) -> str:
     ext_analyzed = report.get("ext_analyzed", [])
     int_review_rows = report.get("int_review_rows", [])
     int_analyzed = report.get("int_analyzed", [])
+    low_quality = report.get("low_quality", [])
 
     W(f"# Bug界定报告 · {vname}")
     W("")
@@ -966,6 +1258,36 @@ def render_bug_review_markdown(report: dict) -> str:
             W("")
     else:
         W("暂无内部复盘Bug。")
+        W("")
+
+    W("## 六、内部低质量任务预判")
+    W("")
+    W("> 说明：以下为 AI 结合关联 Bug 和任务详情做的任务层面预判，用于会前聚焦需求管理、测试排期、流程推进和管理动作问题。")
+    W("")
+    if low_quality:
+        W("| 序号 | 任务 | 风险等级 | 关联Bug | 关键维度 |")
+        W("| --- | --- | --- | --- | --- |")
+        for i, item in enumerate(low_quality, 1):
+            W(f"| {i} | {item['task_link']} | {item['risk_level']} | {item['bug_total']}（外部{item['ext_bug_cnt']} / 内部{item['int_bug_cnt']}） | {item['dimension_summary']} |")
+        W("")
+        for item in low_quality:
+            W(f"### TASK#{item['task_id']} {item['task_link']}")
+            W("")
+            W(f"- 风险等级：{item['risk_level']}（{item['main_type']}）")
+            W(f"- 触发维度：{item['dimension_summary']}")
+            W(f"- AI预判：{item['conclusion']}")
+            W("- 主要依据：")
+            for idx, evidence in enumerate(item.get("evidences", [])[:5], 1):
+                W(f"  {idx}. {evidence}")
+            W("- 暴露问题：")
+            for idx, point in enumerate(item.get("problem_points", [])[:5], 1):
+                W(f"  {idx}. {point}")
+            W("- 改进建议：")
+            for idx, tip in enumerate(item.get("improvements", [])[:5], 1):
+                W(f"  {idx}. {tip}")
+            W("")
+    else:
+        W("暂无明显低质量任务信号。")
         W("")
 
     return "\n".join(lines)
@@ -1215,6 +1537,272 @@ def _classify_lq_root_cause(bugs: list, non_perf_bugs: dict) -> tuple[str, list[
     return root_type, dims
 
 
+def _is_test_like_child(child: dict) -> bool:
+    name = (child.get("name") or "").strip()
+    ctype = str(child.get("type") or "").strip()
+    if "【测试单】" in name or "【用例单】" in name or "测试用例" in name:
+        return True
+    if ctype == "discuss" and "测试" in name:
+        return True
+    return False
+
+
+def _is_impl_like_child(child: dict) -> bool:
+    if _is_test_like_child(child):
+        return False
+    name = (child.get("name") or "").strip()
+    ctype = str(child.get("type") or "").strip()
+    if any(tag in name for tag in ["【开发单】", "【制作单】", "【联调单】"]):
+        return True
+    return ctype in {"devel", "web", "study", "test"}
+
+
+def _count_recent_task_changes(task_view: dict, deadline, window_days: int = 2) -> int:
+    if not deadline:
+        return 0
+    start_dt = datetime.combine(deadline - timedelta(days=window_days), datetime.min.time())
+    end_dt = datetime.combine(deadline + timedelta(days=1), datetime.max.time())
+    action_types = {"edited", "assigned", "activated", "reopened", "finished", "closed", "commented"}
+    total = 0
+    for bucket in ("actions", "subActions"):
+        for item in (task_view.get(bucket, {}) or {}).values():
+            action = (item.get("action") or "").strip()
+            if action not in action_types:
+                continue
+            raw_date = (item.get("date") or "").strip()
+            if not raw_date:
+                continue
+            try:
+                action_dt = datetime.strptime(raw_date[:19], "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                continue
+            if start_dt <= action_dt <= end_dt:
+                total += 1
+    return total
+
+
+def _low_quality_main_type(dimensions: list[str]) -> str:
+    dims = set(dimensions)
+    if {"需求明确性风险", "流程/推进管理风险"} <= dims:
+        return "综合型"
+    if {"测试时间受压", "临近截止仍未收口"} & dims and "流程/推进管理风险" in dims:
+        return "测试与推进混合风险"
+    if "需求明确性风险" in dims:
+        return "需求管理风险"
+    if "测试时间受压" in dims or "临近截止仍未收口" in dims:
+        return "测试与排期风险"
+    if "流程/推进管理风险" in dims:
+        return "流程管理风险"
+    return "研发质量风险"
+
+
+def _build_low_quality_problem_points(dimensions: list[str]) -> list[str]:
+    dims = set(dimensions)
+    points = []
+    if "缺陷暴露面大" in dims or "缺陷暴露面偏大" in dims or "缺陷密度偏高" in dims:
+        points.append("任务质量前置不够，问题不是零散漏点，而是成批暴露。")
+    if "需求明确性风险" in dims:
+        points.append("需求边界、异常场景或验收口径没有在前期收紧，产品与研发对修改点的理解不够一致。")
+    if "临近截止仍未收口" in dims:
+        points.append("截止日前任务仍未真正收口，排期把修复、回归和确认压到了末期。")
+    if "测试时间受压" in dims:
+        points.append("开发交付和测试验证贴得过近，返工会直接挤压测试窗口。")
+    if "流程/推进管理风险" in dims:
+        points.append("临近截止仍有较多编辑、激活或子任务变动，说明推进节奏和变更管理不稳。")
+    if "协同复杂度高" in dims:
+        points.append("任务协同面较大，但阶段性收口和单点负责人机制不够强。")
+    if "排期消耗偏高" in dims or "延期/排期风险" in dims:
+        points.append("排期估算和资源安排偏紧，容易把后续验证和交付缓冲吃掉。")
+    return _dedupe_keep_order(points)
+
+
+def _build_low_quality_improvements(dimensions: list[str]) -> list[str]:
+    dims = set(dimensions)
+    suggestions = []
+    if "需求明确性风险" in dims:
+        suggestions.append("需求评审时把边界、异常场景、验收口径写透，需求变更后同步更新测试点和回归范围。")
+    if "缺陷暴露面大" in dims or "缺陷暴露面偏大" in dims or "缺陷密度偏高" in dims:
+        suggestions.append("加强开发自测、联调走查和提测前冒烟，把批量问题前置拦截，不要等到测试末期集中暴露。")
+    if "临近截止仍未收口" in dims or "测试时间受压" in dims:
+        suggestions.append("把开发完成、自测完成和提测时间前移，至少给测试和回归预留完整窗口，不要把修复堆到截止日。")
+    if "流程/推进管理风险" in dims:
+        suggestions.append("对频繁变更、反复激活、子任务取消这类信号建立预警，按里程碑做阶段收口，而不是临门一脚再统一处理。")
+    if "协同复杂度高" in dims:
+        suggestions.append("多团队任务要拆清里程碑和单点责任人，减少多人并行导致的末期返工和信息错位。")
+    if "排期消耗偏高" in dims or "延期/排期风险" in dims:
+        suggestions.append("重新校准工时评估和资源投入，避免低估工作量把测试和上线缓冲全部吃掉。")
+    return _dedupe_keep_order(suggestions)
+
+
+def _compose_low_quality_conclusion(task_name: str, dimensions: list[str]) -> str:
+    dims = set(dimensions)
+    task_label = _one_line(task_name, 24) or "该任务"
+    if "需求明确性风险" in dims and "流程/推进管理风险" in dims:
+        return f"{task_label} 不是单点实现失误，更像需求管理、任务推进和质量收口同时失守导致的低质量任务。"
+    if "测试时间受压" in dims and "临近截止仍未收口" in dims:
+        return f"{task_label} 的核心问题在于收口过晚，修复和验证被一起挤到截止前，质量风险自然会放大。"
+    if "流程/推进管理风险" in dims and "协同复杂度高" in dims:
+        return f"{task_label} 的问题重点不在单个开发点，而在于协同复杂、末期调整频繁，管理收口没有兜住。"
+    if "缺陷暴露面大" in dims or "缺陷暴露面偏大" in dims or "缺陷密度偏高" in dims:
+        return f"{task_label} 的低质量特征主要体现在缺陷集中暴露，说明质量前置和联调拦截都不够。"
+    return f"{task_label} 已出现明显任务级低质量信号，复盘时应把管理动作、排期和验证策略一起复盘。"
+
+
+def _assess_low_quality_task(task_id: str, task_name: str, bugs: list[dict], task_view: dict, fetch_date) -> dict:
+    task = task_view.get("task", {}) if isinstance(task_view, dict) else {}
+    children_dict = (task.get("children") or {}) if isinstance(task, dict) else {}
+    children = [c for c in children_dict.values() if c.get("deleted", "0") != "1"]
+
+    total_bug = len(bugs)
+    ext_bug_cnt = sum(1 for b in bugs if b.get("classification") in ("1", "2"))
+    int_bug_cnt = sum(1 for b in bugs if b.get("classification") in ("4", "5"))
+    high_bug_cnt = sum(1 for b in bugs if b.get("severity") in ("1", "2") or b.get("isTypical") == "1")
+    req_bug_cnt = sum(
+        1 for b in bugs
+        if b.get("bugTypeParent") == "2"
+        or any(kw in ((b.get("causeAnalysis") or "") + (b.get("tracingBack") or "") + (b.get("title") or "")) for kw in REQUIREMENT_CAUSE_KEYWORDS)
+    )
+    dispute_bug_cnt = sum(
+        1 for b in bugs
+        if b.get("resolution") in ("tostory", "external", "bydesign")
+        or any(kw in ((b.get("causeAnalysis") or "") + (b.get("tracingBack") or "")) for kw in DISPUTE_KEYWORDS)
+    )
+
+    estimate = _to_float(task.get("estimate"))
+    consumed = _to_float(task.get("consumed"))
+    left = _to_float(task.get("left"))
+    progress = int(_to_float(task.get("progress")))
+    deadline = _parse_date(task.get("deadline"))
+    latest_story_version = int(_to_float(task.get("latestStoryVersion")))
+
+    impl_deadlines = sorted(
+        d for c in children if _is_impl_like_child(c)
+        for d in [_parse_date(c.get("deadline"))] if d
+    )
+    test_deadlines = sorted(
+        d for c in children if _is_test_like_child(c)
+        for d in [_parse_date(c.get("deadline"))] if d
+    )
+    latest_impl_deadline = impl_deadlines[-1] if impl_deadlines else None
+    latest_test_deadline = test_deadlines[-1] if test_deadlines else None
+
+    cancel_children = sum(1 for c in children if c.get("status") == "cancel")
+    recent_change_cnt = _count_recent_task_changes(task_view, deadline, window_days=2)
+    bug_density = (total_bug / estimate * 10) if estimate > 0 else 0
+
+    dimensions: list[str] = []
+    evidence: list[str] = []
+    score = 0
+
+    if total_bug >= 8:
+        score += 3
+        dimensions.append("缺陷暴露面大")
+        evidence.append(f"关联 Bug {total_bug} 条（外部 {ext_bug_cnt} / 内部 {int_bug_cnt}）")
+    elif total_bug >= 5:
+        score += 2
+        dimensions.append("缺陷暴露面偏大")
+        evidence.append(f"关联 Bug {total_bug} 条（外部 {ext_bug_cnt} / 内部 {int_bug_cnt}）")
+    elif total_bug >= 3:
+        score += 1
+        evidence.append(f"关联 Bug {total_bug} 条")
+
+    if high_bug_cnt >= 1:
+        score += 2
+        dimensions.append("存在高等级/典型缺陷")
+        evidence.append(f"高等级/典型 Bug {high_bug_cnt} 条")
+
+    if total_bug >= 3 and bug_density >= 1.0:
+        score += 1
+        dimensions.append("缺陷密度偏高")
+        evidence.append(f"每 10 人时约暴露 {bug_density:.1f} 条 Bug")
+
+    if req_bug_cnt >= max(2, (total_bug + 1) // 2) or dispute_bug_cnt >= 2:
+        score += 2
+        dimensions.append("需求明确性风险")
+        evidence.append(f"需求/争议类 Bug {max(req_bug_cnt, dispute_bug_cnt)} 条")
+    elif req_bug_cnt >= 1 or str(task.get("demandReview")) in {"0", "2", "3"}:
+        score += 1
+        dimensions.append("需求明确性风险")
+        evidence.append(f"demandReview={task.get('demandReview') or '空'}，latestStoryVersion={latest_story_version}")
+
+    if task.get("is_delay") == "yes":
+        score += 2
+        dimensions.append("延期/排期风险")
+        evidence.append("任务已被标记为延期")
+    elif estimate > 0 and consumed >= estimate * 1.2:
+        score += 1
+        dimensions.append("排期消耗偏高")
+        evidence.append(f"工时 {consumed:.1f}/{estimate:.1f}h")
+
+    if deadline and deadline <= fetch_date and str(task.get("status") or "") in {"testing", "waittest", "doing", "pause"}:
+        score += 1
+        dimensions.append("临近截止仍未收口")
+        evidence.append(f"截止日 {deadline} 时状态仍为 {task.get('status')}")
+    elif deadline and left > 0 and deadline <= fetch_date:
+        score += 1
+        dimensions.append("临近截止仍未收口")
+        evidence.append(f"截止日 {deadline} 仍剩余工时 {left:.1f}h")
+
+    if latest_impl_deadline and latest_test_deadline:
+        gap = (latest_test_deadline - latest_impl_deadline).days
+        if gap <= 0:
+            score += 2
+            dimensions.append("测试时间受压")
+            evidence.append(f"开发/联调最晚到 {latest_impl_deadline}，测试最晚也到 {latest_test_deadline}")
+        elif gap == 1:
+            score += 1
+            dimensions.append("测试时间受压")
+            evidence.append(f"开发/联调最晚到 {latest_impl_deadline}，测试最晚到 {latest_test_deadline}")
+    elif total_bug >= 3:
+        score += 1
+        dimensions.append("测试保障信息不足")
+        evidence.append("未见独立测试/用例排期")
+
+    if cancel_children >= 2 or recent_change_cnt >= 8:
+        score += 2 if cancel_children >= 5 or recent_change_cnt >= 15 else 1
+        dimensions.append("流程/推进管理风险")
+        evidence.append(f"取消子任务 {cancel_children} 个，截止前两天内关键动作 {recent_change_cnt} 次")
+
+    if len(children) >= 10 and total_bug >= 5:
+        score += 1
+        dimensions.append("协同复杂度高")
+        evidence.append(f"子任务 {len(children)} 个")
+
+    dimensions = _dedupe_keep_order(dimensions)
+    evidence = _dedupe_keep_order(evidence)
+
+    if score >= 6:
+        risk_level = "高"
+    elif score >= 4:
+        risk_level = "中"
+    elif score >= 3:
+        risk_level = "关注"
+    else:
+        risk_level = "低"
+
+    return {
+        "task_id": task_id,
+        "task_name": (task.get("name") or task_name or "").strip(),
+        "task_link": f"[TASK#{task_id} {(task.get('name') or task_name or '').strip()}]({task_url(task_id)})",
+        "score": score,
+        "risk_level": risk_level,
+        "main_type": _low_quality_main_type(dimensions),
+        "dimensions": dimensions,
+        "dimension_summary": "、".join(dimensions) if dimensions else "暂无明显信号",
+        "evidences": evidence,
+        "evidence_summary": "；".join(evidence[:3]) if evidence else "暂无明显依据",
+        "conclusion": _compose_low_quality_conclusion((task.get("name") or task_name or "").strip(), dimensions),
+        "problem_points": _build_low_quality_problem_points(dimensions),
+        "improvements": _build_low_quality_improvements(dimensions),
+        "bug_total": total_bug,
+        "ext_bug_cnt": ext_bug_cnt,
+        "int_bug_cnt": int_bug_cnt,
+        "high_bug_cnt": high_bug_cnt,
+        "status": task.get("status") or "",
+        "deadline": task.get("deadline") or "",
+    }
+
+
 # ─── 主分析函数 ───────────────────────────────────────────────────────────────
 
 def calc_bug_review(
@@ -1447,50 +2035,30 @@ def calc_bug_review(
             "is_dispute":      ctype == "争议",
         })
 
-    # ── 低质量任务识别 ─────────────────────────────────────────────────────────
-    # 构建 task_map，顺便把用于根因分析的字段带进去
-    task_map: dict = {}
+    # ── 内部低质量任务预判 ─────────────────────────────────────────────────────
+    task_map: dict[str, dict] = {}
+    fetch_date = datetime.strptime(fetch_time[:10], "%Y-%m-%d").date()
     for b in non_perf:
         use_mid, use_mname = _get_task_ref(b)
         if not use_mid:
             continue
-        cause = _get_cause(b)
-        dnames = _get_dept_names(b, dept_review)
-        dispute_reason, _ = _predict_dispute(b, dnames, cause)
         if use_mid not in task_map:
             task_map[use_mid] = {"name": use_mname, "bugs": []}
-        task_map[use_mid]["bugs"].append({
-            "id":         str(b.get("id", "")),
-            "title":      b.get("title", ""),
-            "sev":        b.get("severity", ""),
-            "isTypical":  b.get("isTypical", "0"),
-            "btp":        b.get("bugTypeParent", ""),
-            "cause":      cause,
-            "has_dispute": bool(dispute_reason),
-        })
+        task_map[use_mid]["bugs"].append(b)
 
     low_quality, watch_list = [], []
     for tid, info in sorted(task_map.items(), key=lambda x: -len(x[1]["bugs"])):
-        blist     = info["bugs"]
-        total_cnt = len(blist)
-        high_cnt  = sum(1 for bx in blist if bx["sev"] in ("1", "2") or bx["isTypical"] == "1")
-
-        if total_cnt >= 5 or high_cnt >= 1:
-            root_type, dims = _classify_lq_root_cause(blist, {})
-            low_quality.append({
-                "task_id":   tid,
-                "task_name": info["name"],
-                "total":     total_cnt,
-                "high":      high_cnt,
-                "root_type": root_type,
-                "dims":      dims,
-            })
-        elif total_cnt >= 2:
-            watch_list.append({
-                "task_id":   tid,
-                "task_name": info["name"],
-                "total":     total_cnt,
-            })
+        try:
+            task_view = client.fetch_task_view(tid, force_refresh=force_refresh)
+        except Exception:
+            task_view = {}
+        assessment = _assess_low_quality_task(tid, info["name"], info["bugs"], task_view, fetch_date)
+        if assessment["risk_level"] == "高":
+            low_quality.append(assessment)
+        elif assessment["risk_level"] in {"中", "关注"}:
+            watch_list.append(assessment)
+    low_quality.sort(key=lambda x: (x["score"], x["bug_total"]), reverse=True)
+    watch_list.sort(key=lambda x: (x["score"], x["bug_total"]), reverse=True)
 
     # ── 摘要统计 ───────────────────────────────────────────────────────────────
     ext_dispute_cnt = sum(1 for b in ext_analyzed if b["cls_type"] == "争议")
