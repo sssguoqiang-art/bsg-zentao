@@ -197,9 +197,13 @@ def _build_reference_display(raw: str, default_label: str, fallback_url: str = "
     if url:
         label = default_label
         if default_label == "关联用例":
-            if "说明文档" in note:
+            if "无用例" in note and "说明文档" in note:
+                note = "没有用例，依据说明文档测试"
+                label = "说明文档"
+            elif "说明文档" in note:
                 label = "说明文档"
             elif "无用例" in note:
+                note = "没有用例"
                 label = "关联说明"
         elif default_label == "关联需求" and "无需求" in note:
             label = "关联任务"
@@ -210,6 +214,42 @@ def _build_reference_display(raw: str, default_label: str, fallback_url: str = "
         return link
 
     return note or raw
+
+
+def _describe_use_case_reference(raw_use_case: str) -> str:
+    note = _strip_urls(raw_use_case)
+    if not raw_use_case:
+        return "无"
+    if "无法溯源" in note:
+        return "仅有文字记录，无可打开链接"
+    if "无用例" in note and "说明文档" in note:
+        return "没有用例，依据说明文档测试"
+    if "无用例" in note:
+        return "没有用例"
+    return "已挂正式用例/说明链接"
+
+
+def _describe_use_case_coverage(signal: str, raw_use_case: str) -> str:
+    note = _strip_urls(raw_use_case)
+    if not raw_use_case:
+        return "无"
+    if "无法溯源" in note:
+        return "无法判断（没有可打开的正式用例）"
+    if "无用例" in note and "说明文档" in note:
+        return "没有用例，依据说明文档测试"
+    if "无用例" in note:
+        return "没有用例"
+
+    mapping = {
+        "covered": "已覆盖",
+        "related": "未明显覆盖完整测试点",
+        "not_found": "未覆盖",
+        "unreadable": "无法判断",
+        "missing": "无",
+        "untraceable": "无法判断（没有可打开的正式用例）",
+        "no_case": "没有用例",
+    }
+    return mapping.get(signal, "无法判断")
 
 
 def _extract_result_from_steps(steps: str) -> str:
@@ -451,10 +491,13 @@ def _assess_use_case_coverage(
     if not raw_use_case:
         return ("当前没有关联用例，无法判断测试是否覆盖到这个测试点。", "missing")
 
+    if "无法溯源" in use_case_note:
+        return ("字段里只有“无法溯源”这类文字记录，没有可点击的正式用例链接，因此当前无法点进去核对测试是否覆盖到这个测试点。", "untraceable")
+
     if "无用例" in use_case_note:
-        if use_case_context:
-            return ("字段里已明确写了“无用例”，当前附带的更像说明文档而不是正式测试用例，因此不能据此认定测试已覆盖这个测试点。", "no_case")
-        return ("字段里已明确写了“无用例”，当前没有正式用例可供核对，测试覆盖情况无法成立。", "no_case")
+        if "说明文档" in use_case_note:
+            return ("没有用例，依据说明文档测试；当前不能按正式用例覆盖来判断这个测试点是否被覆盖。", "no_case")
+        return ("没有正式用例，当前无法按用例覆盖来判断这个测试点是否被测试到。", "no_case")
 
     if not use_case_context:
         return ("已挂关联用例链接，但当前无法读取正文内容，暂时无法判断用例有没有覆盖到这个测试点。", "unreadable")
@@ -680,10 +723,8 @@ def _build_decision_reason(
 
     lines.append("三、用例对照：")
     use_case_items = []
-    if raw_use_case:
-        use_case_items.append("关联用例：已挂用例/说明链接")
-    else:
-        use_case_items.append("关联用例：无")
+    use_case_items.append(f"关联用例：{_describe_use_case_reference(raw_use_case)}")
+    use_case_items.append(f"覆盖结论：{_describe_use_case_coverage(use_case_signal, raw_use_case)}")
     use_case_items.append(f"判断：{use_case_note}")
     for idx, item in enumerate(use_case_items, 1):
         lines.append(f"{idx}. {item}")
