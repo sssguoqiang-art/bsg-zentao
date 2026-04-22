@@ -479,6 +479,16 @@ class ZentaoClient:
             "deptReview": {...},   # 各部门复盘情况，key=Bug ID（Bug界定场景使用）
         }
 
+        溯源相关字段（2026-04 实测）：
+          phenomenon      → 现象
+          scopeInfluence  → 影响范围
+          demand          → 需求链接/说明
+          useCase         → 用例链接
+          disputeRemark   → 争议备注
+          tracingBack     → 溯源说明（历史兼容文本块）
+          exclusionReason → 剔除原因
+        后续消费应优先读结构化字段；`tracingBack` 仅在缺失时作兼容回退。
+
         接口说明：
           mode=1  → 全量数据，统一使用此模式
           mode=2  → 已废弃，会遗漏数据，禁止使用

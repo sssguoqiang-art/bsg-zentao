@@ -239,7 +239,12 @@ env == "require" 且未完成的需求
 | 生成Bug界定（预分类材料） | `zentao_bug_review`                          |
 | 只说『复盘』无其他修饰   | 先确认：『版本复盘报告』还是『Bug界定预分类』？           |
 
-**多项目处理**：用户未指定项目时，询问："您想查看哪个项目的数据？"并列出可选项目列表。
+**多项目处理**：
+
+- 用户未指定项目时，默认按**平台项目（project_id=10）**处理。
+- 只有用户明确说了**游戏项目**时，才切到游戏项目。
+- 只有用户明确说了**平台项目+游戏项目 / 双项目**时，才同时输出两边内容。
+- `周汇总 / 周报` 例外，固定走平台项目 + 游戏项目双项目。
 
 ---
 
@@ -509,10 +514,10 @@ ownerDept（非空时直接用）
 |---|---|
 | `isDispute == "1"` | 已手动标记争议，最高优先级 |
 | ownerDept 空 且 deptReview.depts 空 | 无归属信息 |
-| causeAnalysis/tracingBack 空或无效（纯数字/单字）| 溯源缺失 |
+| causeAnalysis + 结构化溯源字段（phenomenon/scopeInfluence/disputeRemark）均空或无效 | 溯源缺失 |
 | `resolution == "external"` | 疑似非Bug（配置/部署）|
 | `resolution == "tostory"` | 已转需求 |
-| causeAnalysis/tracingBack 含需求分歧关键词 | 见下方列表 |
+| causeAnalysis/disputeRemark/tracingBack 含需求分歧关键词 | 见下方列表 |
 
 **需求分歧关键词（匹配任一即触发争议）：**
 ```python
@@ -542,13 +547,14 @@ ownerDept（非空时直接用）
 ## 二、疑似非Bug 清单（type=performance 外部Bug）
   列：BugID / Bug现象 / 溯源摘要 / resolution / 建议
   无此类Bug时：注明"本版本无疑似非Bug"
+  剔除原因优先读取 `exclusionReason`，为空时再回退旧逻辑（`tracingBack`/规则推断）
 
 ## 三、外部 Bug 责任界定（卡片式，每条Bug三行）
   范围：classification in (1,2) AND type≠performance
   表头行：BugID | 等级 | 责任部门（+测试责任） | 归属类型 | 复盘建议
-  展开行1：Bug现象（从标题推断）
-  展开行2：影响范围（_assess_impact推断）
-  展开行3：可能原因（causeAnalysis/tracingBack，含建议/争议说明）
+  展开行1：Bug现象（优先 phenomenon，缺失时再从标题/tracingBack 推断）
+  展开行2：影响范围（优先 scopeInfluence，缺失时再 _assess_impact 推断）
+  展开行3：可能原因（优先 causeAnalysis，其次 disputeRemark，最后 tracingBack 兼容补充）
   复盘建议取值：建议复盘 / 需会前确认 / 复盘价值有限
 
 ## 四、内部 Bug 责任界定（卡片式，每条Bug三行）

@@ -364,7 +364,7 @@ def get_version_bugs(
 def _slim_bug(b: dict) -> dict:
     """
     精简单个 Bug 对象。
-    原始对象 100+ 字段 → 精简后 ~12 个字段。
+    原始对象 100+ 字段 → 精简后保留核心复盘字段。
 
     mainTaskId 类型不一致处理（已实测）：
       无关联：int(0) 或 string "0" → None
@@ -383,4 +383,13 @@ def _slim_bug(b: dict) -> dict:
         "opened_date":    b.get("openedDate", "") or "",
         "main_task_id":   get_main_task_id(b),   # None 或 string ID
         "owner_dept":     b.get("ownerDept", "") or "",  # 逗号分隔的部门 ID
+        "resolution":     b.get("resolution", "") or "",
+        "cause_analysis": (b.get("causeAnalysis") or "").strip(),
+        "dispute_remark": (b.get("disputeRemark") or "").strip(),
+        "tracing_back":   (b.get("tracingBack") or "").strip(),
+        "exclusion_reason": (b.get("exclusionReason") or "").strip(),
+        "scope_influence": (b.get("scopeInfluence") or "").strip(),
+        "phenomenon":     (b.get("phenomenon") or "").strip(),
+        "demand":         (b.get("demand") or "").strip(),
+        "use_case":       (b.get("useCase") or "").strip(),
     }

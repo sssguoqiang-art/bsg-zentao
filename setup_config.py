@@ -139,7 +139,7 @@ def _setup_profile(zentao_account: str):
     print("════════════════════════════════════")
     print()
     print("知识库帮助系统记住你的身份和使用习惯，越用越懂你。")
-    print("以下信息可以随时在 Claude Code 中说"修改我的配置"来更新。")
+    print('以下信息可以随时在 Claude Code 中说"修改我的配置"来更新。')
     print()
 
     # 如果已有 Profile，询问是否重新配置
@@ -181,7 +181,7 @@ def _setup_profile(zentao_account: str):
     # 主要关注项目
     print()
     projects = ["平台项目", "游戏项目", "两者"]
-    print("主要关注项目：")
+    print("主要关注项目（仅作偏好记录，未指定项目时系统仍默认平台项目）：")
     for i, p in enumerate(projects, 1):
         print(f"  {i}. {p}")
     proj_input = input("输入序号（1-3）：").strip()

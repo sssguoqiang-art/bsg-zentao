@@ -97,6 +97,15 @@ def _excl_reason(bug: dict) -> str:
     非Bug剔除原因（单行，严格清除换行/URL，适合 Markdown 表格单元格）。
     ⚠️ 必须保证输出不含 \\n，否则会破坏表格行结构。
     """
+    exclusion = (bug.get("exclusion_reason") or "").strip()
+    if exclusion:
+        clean = re.sub(r'https?://\S+', '', exclusion)
+        clean = re.sub(r'&\w+;', '', clean)
+        clean = re.sub(r'[\n\r\t]', ' ', clean)
+        clean = re.sub(r'\s{2,}', ' ', clean).strip()
+        if clean:
+            return clean
+
     if "performance" in (bug.get("type") or ""):
         tracing = (bug.get("tracing_back") or "").strip()
         if tracing:
@@ -117,6 +126,9 @@ def _severity_label(bug: dict, with_scope: bool = False) -> str:
     sev   = str(bug.get("severity") or "")
     label = SEVERITY_LABEL.get(sev, f"severity={sev}")
     if with_scope:
+        scope_text = (bug.get("scope_influence") or "").strip()
+        if scope_text:
+            return f"{label} {scope_text}"
         scope = SEVERITY_SCOPE.get(sev, "")
         return f"{label} {scope}" if scope else label
     return label
@@ -244,6 +256,13 @@ def calc_ext_bugs(bugs: list[dict], dept_review: dict) -> dict:
             "title":          (b.get("title") or "").strip(),
             "link":           _bug_link(b),
             "severity_label": _severity_label(b, with_scope=True),
+            "phenomenon":     (b.get("phenomenon") or "").strip(),
+            "scope_influence": (b.get("scope_influence") or "").strip(),
+            "demand":         (b.get("demand") or "").strip(),
+            "use_case":       (b.get("use_case") or "").strip(),
+            "dispute_remark": (b.get("dispute_remark") or "").strip(),
+            "exclusion_reason": (b.get("exclusion_reason") or "").strip(),
+            "cause_analysis": (b.get("cause_analysis") or "").strip(),
             "tracing":        (b.get("tracing_back") or "").strip() or _IFACE,
             "depts":          depts,
         })

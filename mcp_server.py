@@ -67,6 +67,8 @@ log = logging.getLogger(__name__)
 # ─── 全局客户端（懒加载）──────────────────────────────────────────────────────
 
 _client: ZentaoClient | None = None
+DEFAULT_PROJECT_ID = "10"
+DEFAULT_PROJECT_NAME = "平台项目"
 
 
 def _get_client() -> ZentaoClient:
@@ -108,7 +110,7 @@ async def list_tools() -> list[types.Tool]:
                         "type": "string",
                         "description": (
                             f"项目 ID。可选值：{_project_choices()}。"
-                            "如果用户未指定，优先使用平台项目（10）。"
+                            "如果用户未指定，默认使用平台项目（10）。"
                         ),
                     },
                     "force_refresh": {
@@ -117,7 +119,7 @@ async def list_tools() -> list[types.Tool]:
                         "default": False,
                     },
                 },
-                "required": ["project_id"],
+                "required": [],
             },
         ),
 
@@ -246,7 +248,11 @@ async def list_tools() -> list[types.Tool]:
                 "properties": {
                     "project_id": {
                         "type": "string",
-                        "description": f"项目 ID。可选值：{_project_choices()}。如果用户未指定，询问想要哪个项目。",
+                        "description": (
+                            f"项目 ID。可选值：{_project_choices()}。"
+                            "如果用户未指定，默认使用平台项目（10）；"
+                            "只有用户明确说“平台项目+游戏项目”时，才分别生成双项目内容。"
+                        ),
                     },
                     "force_refresh": {
                         "type": "boolean",
@@ -254,7 +260,7 @@ async def list_tools() -> list[types.Tool]:
                         "default": False,
                     },
                 },
-                "required": ["project_id"],
+                "required": [],
             },
         ),
 
@@ -274,7 +280,10 @@ async def list_tools() -> list[types.Tool]:
                 "properties": {
                     "project_id": {
                         "type": "string",
-                        "description": f"项目 ID。可选值：{_project_choices()}。未指定时优先平台项目（10）。",
+                        "description": (
+                            f"项目 ID。可选值：{_project_choices()}。"
+                            "未指定时默认平台项目（10）；只有用户明确说双项目时才分别处理。"
+                        ),
                     },
                     "version": {
                         "type": "string",
@@ -287,7 +296,7 @@ async def list_tools() -> list[types.Tool]:
                         "default": False,
                     },
                 },
-                "required": ["project_id"],
+                "required": [],
             },
         ),
 
@@ -334,7 +343,10 @@ async def list_tools() -> list[types.Tool]:
                     },
                     "project_id": {
                         "type": "string",
-                        "description": f"项目 ID。可选值：{_project_choices()}。未指定时优先平台项目（10）。",
+                        "description": (
+                            f"项目 ID。可选值：{_project_choices()}。"
+                            "未指定时默认平台项目（10）；只有用户明确说双项目时才分别处理。"
+                        ),
                     },
                     "force_refresh": {
                         "type": "boolean",
@@ -342,7 +354,7 @@ async def list_tools() -> list[types.Tool]:
                         "default": False,
                     },
                 },
-                "required": ["project_id"],
+                "required": [],
             },
         ),
 
@@ -414,7 +426,10 @@ async def list_tools() -> list[types.Tool]:
                     "zentao_account":  {"type": "string", "description": "禅道账号（登录用户名）"},
                     "department":      {"type": "string", "description": f"部门，可选：{'、'.join(DEPARTMENTS)}"},
                     "role":            {"type": "string", "description": f"角色，可选：{'、'.join(ROLES)}"},
-                    "primary_project": {"type": "string", "description": "主要关注项目：平台项目 / 游戏项目 / 两者"},
+                    "primary_project": {
+                        "type": "string",
+                        "description": "主要关注项目：平台项目 / 游戏项目 / 两者。仅作偏好记录；未指定项目时系统仍默认平台项目。",
+                    },
                     "common_tasks":    {"type": "array",  "items": {"type": "string"}, "description": f"常用操作列表，可选：{'、'.join(COMMON_TASKS)}"},
                     "output_pref":     {"type": "string", "description": f"输出偏好，可选：{'、'.join(OUTPUT_PREFERENCES)}"},
                 },
@@ -493,7 +508,7 @@ async def _dispatch(name: str, args: dict[str, Any]) -> Any:
 
     # ── 数据工具1：版本列表 ──────────────────────────────────────────────────
     if name == "zentao_get_versions":
-        project_id = args["project_id"]
+        project_id = args.get("project_id", DEFAULT_PROJECT_ID)
         force_refresh = bool(args.get("force_refresh", False))
         log.info("工具调用：zentao_get_versions（project=%s，refresh=%s）", project_id, force_refresh)
         return get_versions(_get_client(), project_id, force_refresh=force_refresh)
@@ -556,14 +571,14 @@ async def _dispatch(name: str, args: dict[str, Any]) -> Any:
 
     # ── 报告工具1：日报 ──────────────────────────────────────────────────────
     elif name == "zentao_daily_report":
-        project_id = args["project_id"]
+        project_id = args.get("project_id", DEFAULT_PROJECT_ID)
         force_refresh = bool(args.get("force_refresh", False))
         log.info("工具调用：zentao_daily_report（project=%s，refresh=%s）", project_id, force_refresh)
         return assemble_daily_report(_get_client(), project_id, force_refresh=force_refresh)
 
     # ── 报告工具2：版本复盘 ──────────────────────────────────────────────────
     elif name == "zentao_version_review":
-        project_id = args["project_id"]
+        project_id = args.get("project_id", DEFAULT_PROJECT_ID)
         version    = args.get("version", "auto")
         force_refresh = bool(args.get("force_refresh", False))
         log.info("工具调用：zentao_version_review（project=%s，version=%s，refresh=%s）", project_id, version, force_refresh)
@@ -577,7 +592,7 @@ async def _dispatch(name: str, args: dict[str, Any]) -> Any:
 
     # ── 报告工具4：Bug 界定预分类 ────────────────────────────────────────────
     elif name == "zentao_bug_review":
-        project_id = args["project_id"]
+        project_id = args.get("project_id", DEFAULT_PROJECT_ID)
         version_id = args.get("version_id")
         force_refresh = bool(args.get("force_refresh", False))
         log.info("工具调用：zentao_bug_review（project=%s，version=%s，refresh=%s）", project_id, version_id or "auto", force_refresh)
@@ -651,7 +666,7 @@ async def _dispatch(name: str, args: dict[str, Any]) -> Any:
                     "请提供以下信息来配置你的个人知识库：\n"
                     f"  姓名、禅道账号、部门（{' / '.join(DEPARTMENTS[:5])}…）、"
                     f"角色（{'、'.join(ROLES)}）、"
-                    "主要关注项目（平台项目/游戏项目/两者）、"
+                    f"主要关注项目（平台项目/游戏项目/两者；仅作偏好记录，未指定项目时仍默认{DEFAULT_PROJECT_NAME}）、"
                     f"常用操作（多选，可选：{'、'.join(COMMON_TASKS[:4])}…）、"
                     f"输出偏好（{'、'.join(OUTPUT_PREFERENCES)}）"
                 ),

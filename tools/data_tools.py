@@ -217,13 +217,21 @@ def _slim_bug(b: dict) -> dict:
         "type":           b.get("type", "") or "",
         "status":         b.get("status", "") or "",
         "severity":       str(b.get("severity", "") or ""),
+        "resolution":     b.get("resolution", "") or "",
         "is_typical":     str(b.get("isTypical", "0")) == "1",
         "is_dispute":     str(b.get("isDispute", "0")) == "1",
         "deadline":       b.get("deadline", "") or "",
         "opened_date":    b.get("openedDate", "") or "",
         "main_task_id":   get_main_task_id(b),
         "owner_dept":     b.get("ownerDept", "") or "",
+        "cause_analysis": (b.get("causeAnalysis") or "").strip(),
+        "dispute_remark": (b.get("disputeRemark") or "").strip(),
         "tracing_back":   (b.get("tracingBack") or "").strip(),
+        "exclusion_reason": (b.get("exclusionReason") or "").strip(),
+        "scope_influence": (b.get("scopeInfluence") or "").strip(),
+        "phenomenon":     (b.get("phenomenon") or "").strip(),
+        "demand":         (b.get("demand") or "").strip(),
+        "use_case":       (b.get("useCase") or "").strip(),
     }
 
 

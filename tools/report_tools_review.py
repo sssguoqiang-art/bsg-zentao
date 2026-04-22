@@ -46,14 +46,18 @@ def _gen_bug_descriptions(all_bugs: list[dict]) -> dict[str, str]:
     # 规则推断（退回用）
     fallback: dict[str, str] = {}
     for b in all_bugs:
+        phenomenon = (b.get("phenomenon") or "").strip()
         tracing = b.get("tracing", "") or ""
         title   = b.get("title", "") or ""
-        m = re.search(r'现象[：:]([^\n]+)', tracing)
-        if m:
-            fallback[b["id"]] = m.group(1).strip()[:30]
+        if phenomenon:
+            fallback[b["id"]] = phenomenon[:30]
         else:
-            clean = re.sub(r'【[^】]+】', '', title).strip()
-            fallback[b["id"]] = clean[:25] if clean else title[:25]
+            m = re.search(r'现象[：:]([^\n]+)', tracing)
+            if m:
+                fallback[b["id"]] = m.group(1).strip()[:30]
+            else:
+                clean = re.sub(r'【[^】]+】', '', title).strip()
+                fallback[b["id"]] = clean[:25] if clean else title[:25]
 
     try:
         import anthropic as _anthropic
@@ -61,6 +65,7 @@ def _gen_bug_descriptions(all_bugs: list[dict]) -> dict[str, str]:
 
         items = []
         for b in all_bugs:
+            phenomenon = (b.get("phenomenon") or "").strip()[:100]
             tracing   = (b.get("tracing", "") or "").strip()[:300]
             title     = b.get("title", "") or ""
             causes    = [
@@ -69,6 +74,8 @@ def _gen_bug_descriptions(all_bugs: list[dict]) -> dict[str, str]:
             ]
             cause_str = causes[0][:100] if causes else ""
             line = f"ID={b['id']} 标题={title}"
+            if phenomenon:
+                line += f" 现象={phenomenon}"
             if tracing:
                 line += f" 溯源={tracing}"
             if cause_str:
@@ -141,8 +148,11 @@ def _resolve_target_version(client, project_id: str, version: str, force_refresh
 #  文本处理工具
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _extract_phenomenon(tracing: str) -> str:
-    """从 tracingBack 提取Bug现象（外部Bug专用）。"""
+def _extract_phenomenon(phenomenon: str, tracing: str) -> str:
+    """优先使用结构化 phenomenon，缺失时再从 tracingBack 兼容提取。"""
+    phenomenon = (phenomenon or "").strip()
+    if phenomenon and phenomenon != _IFACE:
+        return phenomenon
     if not tracing or tracing == _IFACE:
         return _MANUAL
     m = re.search(r'现象[：:]([^\n]+)', tracing)
@@ -153,6 +163,57 @@ def _extract_phenomenon(tracing: str) -> str:
         if l.strip() and not l.strip().startswith('http') and len(l.strip()) > 5
     ]
     return lines[0][:60] if lines else _MANUAL
+
+
+def _extract_tracing_summary(tracing: str) -> str:
+    """从旧 tracingBack 中提取除现象/链接标签外的剩余说明文本。"""
+    tracing = (tracing or "").strip()
+    if not tracing or tracing == _IFACE:
+        return ""
+
+    kept: list[str] = []
+    for raw in tracing.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if re.match(r"^(现象|影响范围|需求|用例|争议备注)[：:]", line):
+            continue
+        if line.startswith("http://") or line.startswith("https://"):
+            continue
+        kept.append(line)
+
+    if not kept:
+        return ""
+
+    text = " ".join(kept)
+    text = re.sub(r"\s{2,}", " ", text).strip()
+    return text
+
+
+def _format_tracing_ref(label: str, value: str) -> str:
+    """把需求/用例字段格式化成链接或纯文本标签。"""
+    value = (value or "").strip()
+    if not value or value == _IFACE:
+        return ""
+    if re.match(r"^https?://", value):
+        return f"[{label}]({value})"
+    return f"{label}：{value}"
+
+
+def _render_tracing_line(bug: dict) -> str:
+    parts = []
+    demand_ref = _format_tracing_ref("关联需求", bug.get("demand", ""))
+    use_case_ref = _format_tracing_ref("关联用例", bug.get("use_case", ""))
+    if demand_ref:
+        parts.append(demand_ref)
+    if use_case_ref:
+        parts.append(use_case_ref)
+
+    summary = _extract_tracing_summary(bug.get("tracing", ""))
+    if summary:
+        parts.append(summary)
+
+    return " ".join(parts).strip()
 
 
 def _severity_label(bug: dict, with_scope: bool = False) -> str:
@@ -341,14 +402,17 @@ def _generate_markdown(
     W("---")
     NL()
 
-    # 1.3 实际复盘Bug列表（Bug现象从tracingBack提取）
+    # 1.3 实际复盘Bug列表（优先读结构化字段，缺失时回退 tracingBack）
     W("### 1.3 外部Bug 实际复盘Bug列表")
     NL()
     W("| 序号  | Bug标题 | 缺陷等级/影响 | Bug现象 | 责任部门 |")
     W("| --- | --- | --- | --- | --- |")
     for i, b in enumerate(ext["review_list"], 1):
         da = next((d for d in ext["deep_analysis"] if d["id"] == b["id"]), None)
-        phenomenon = _extract_phenomenon(da["tracing"]) if da else _MANUAL
+        phenomenon = _extract_phenomenon(
+            da.get("phenomenon", "") if da else "",
+            da.get("tracing", "") if da else "",
+        )
         W(f"| {i}   | {b['link']} | {b['severity_label']} | {phenomenon} | {b['dept_str']} |")
     NL()
     dis_bugs  = [b for b in ext["review_list"] if b["is_dispute"]]
@@ -420,16 +484,20 @@ def _generate_markdown(
             W(f"# {desc}")
             NL()
         W(f"**Bug标题：** {b['link']}")
-        phenomenon = _extract_phenomenon(b["tracing"])
+        phenomenon = _extract_phenomenon(b.get("phenomenon", ""), b.get("tracing", ""))
         W(f"**Bug现象：** {phenomenon}")
         W(f"**缺陷等级：** {b['severity_label']}")
-        W(f"**溯源：** {b['tracing']}")
+        tracing_line = _render_tracing_line(b)
+        if tracing_line:
+            W(f"**溯源：** {tracing_line}")
         NL()
         for d in b["depts"]:
             if d["is_dispute"]:
                 W(f"**{d['name']} · 争议**")
                 NL()
-                W(f"- 争议：{d['cause']}")
+                dispute_text = (b.get("dispute_remark") or "").strip()
+                if dispute_text:
+                    W(f"- 争议：{dispute_text}")
                 W(f"- 举措：{d['step']}")
             else:
                 W(f"**{d['name']}**")
