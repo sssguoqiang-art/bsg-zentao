@@ -61,6 +61,7 @@ _CACHE_TTLS = {
     "需求池_": 60,
     "Bug数据_": 30,
     "人员任务_": 60,
+    "任务详情_": 60,
 }
 
 
@@ -550,6 +551,45 @@ class ZentaoClient:
         )
 
     # ── 接口4：人员任务汇总（report/workassignsummary）─────────────────────────
+
+    def fetch_task_view(self, task_id: str, force_refresh: bool = False) -> dict:
+        """
+        获取单条任务详情（task/view）。
+
+        返回结构保留禅道原始关键块：
+        {
+            "task":       {...},
+            "actions":    {...},
+            "subActions": {...},
+            ...
+        }
+
+        说明：
+          - `task.children` 中可读取子任务的 finishedDate / realStarted / openedDate 等时间字段
+          - `actions` / `subActions` 可用于追踪开发完成、提测、自测等动作历史
+        """
+        cache_name = f"任务详情_{task_id}"
+        log.info("拉取任务详情（taskID=%s）…", task_id)
+
+        def _fetch():
+            outer = self._get(
+                params={
+                    "m": "task", "f": "view",
+                    "taskID": str(task_id),
+                    "getData": "1", "t": "json",
+                },
+                label=f"任务详情_{task_id}",
+            )
+            data = outer.get("data")
+            if isinstance(data, str):
+                inner = _parse_json(data)
+                if isinstance(inner, dict):
+                    return inner
+            return outer if isinstance(outer, dict) else {}
+
+        return self._fetch_with_fallback(
+            cache_name, _fetch, ttl_seconds=_ttl_for_cache(cache_name), force_refresh=force_refresh
+        )
 
     def fetch_workassign(
         self,

@@ -18,7 +18,7 @@ from datetime import date
 from pathlib import Path
 
 from bsg_zentao.client import ZentaoClient
-from bsg_zentao.constants import ACTIVE_PROJECTS, REPORT_DEPTS_RAW, to_display
+from bsg_zentao.constants import ACTIVE_PROJECTS, REPORT_DEPTS_RAW, STATUS_DONE, get_env_display, to_display
 from bsg_zentao.utils import (
     get_report_path, make_daily_filename,
     weekday_cn, fmt_date_full,
@@ -28,10 +28,13 @@ from tools.calc_daily import (
     calc_summary, calc_dept_progress, calc_delay_list,
     calc_not_test_list, calc_test_focus, calc_online_bugs,
     calc_rejected_list, calc_next_workload,
-    is_pool_in_version,
+    calc_testing_followups, calc_merge_pending,
+    is_pool_in_version, _get_followup_subtasks,
 )
 
 log = logging.getLogger(__name__)
+
+_ZERO_DT_VALUES = {"", "0000-00-00", "0000-00-00 00:00:00"}
 
 
 # ─── 数据校验 ─────────────────────────────────────────────────────────────────
@@ -110,9 +113,193 @@ def _format_dept_workload(dept_workload: dict) -> list[dict]:
     return rows
 
 
+def _has_valid_dt(value: str) -> bool:
+    raw = (value or "").strip()
+    return raw not in _ZERO_DT_VALUES
+
+
+def _display_dt(value: str) -> str:
+    raw = (value or "").strip()
+    if not _has_valid_dt(raw):
+        return ""
+    return raw[5:16] if len(raw) >= 16 else raw[5:10]
+
+
+def _task_view_child_map(task_view: dict) -> dict[str, dict]:
+    task = (task_view or {}).get("task", {}) or {}
+    children = task.get("children", {}) or {}
+    result: dict[str, dict] = {}
+    for key, child in children.items():
+        if not isinstance(child, dict):
+            continue
+        child_id = str(child.get("id") or key or "")
+        if child_id:
+            result[child_id] = child
+    return result
+
+
+def _task_view_started_action_map(task_view: dict) -> dict[str, str]:
+    started_map: dict[str, str] = {}
+    for action in ((task_view or {}).get("subActions") or {}).values():
+        if not isinstance(action, dict):
+            continue
+        if (action.get("action", "") or "") != "started":
+            continue
+        object_id = str(action.get("objectID", "") or "")
+        started_at = (action.get("date", "") or "")
+        if not object_id or not _has_valid_dt(started_at):
+            continue
+        prev = started_map.get(object_id, "")
+        if not prev or started_at < prev:
+            started_map[object_id] = started_at
+    return started_map
+
+
+def _pick_testing_started(child: dict, started_action_map: dict[str, str]) -> tuple[str, str]:
+    real_started = (child or {}).get("realStarted", "") or ""
+    if _has_valid_dt(real_started):
+        return real_started, "realStarted"
+
+    child_id = str((child or {}).get("id", "") or "")
+    started_action = started_action_map.get(child_id, "")
+    if _has_valid_dt(started_action):
+        return started_action, "startedAction"
+
+    for field, source in (("openedDate", "openedDate"), ("assignedDate", "assignedDate")):
+        value = (child or {}).get(field, "") or ""
+        if _has_valid_dt(value):
+            return value, source
+    return "", ""
+
+
+def _merge_status_summary(env: str) -> str:
+    if env == "require":
+        return "当前仍待合并"
+    if env == "noRequire":
+        return "当前无需合并"
+    if env == "deliver":
+        return "当前已交付测试"
+    if env == "fixDone":
+        return "当前测试结果已回写"
+    if env == "devDone":
+        return "当前开发已完成"
+    return f"当前状态：{get_env_display(env)}"
+
+
+def _testing_handoff_summary(started_at: str, started_source: str) -> str:
+    if not started_at:
+        return ""
+    display = _display_dt(started_at)
+    if started_source == "realStarted":
+        return f"测试组 {display} 开始接手"
+    if started_source == "startedAction":
+        return f"测试组 {display} 开始接手"
+    if started_source == "openedDate":
+        return f"测试单 {display} 已创建，暂未看到开始时间"
+    if started_source == "assignedDate":
+        return f"测试单 {display} 已分配，暂未看到开始时间"
+    return ""
+
+
+def _enrich_testing_followups(
+    client: ZentaoClient,
+    rows: list[dict],
+    pools: list[dict],
+    task_details: dict,
+    php_member_map: dict,
+    *,
+    force_refresh: bool = False,
+) -> list[dict]:
+    """
+    为“测试收口中”补充过程维度信息：
+      - 各开发/美术部门最近完成时间
+      - 最近一笔交付时间
+      - 测试开始接手时间
+      - 当前合并状态的人话摘要
+
+    说明：
+      - 开发完成时间：依赖 task/view.children.finishedDate
+      - 测试开始时间：优先 realStarted，缺失时回退 openedDate / assignedDate
+      - 合并时间：接口中暂无稳定字段，因此只输出当前合并状态，不输出时间
+    """
+    if not rows:
+        return rows
+
+    pool_map = {str(p.get("task_id", "") or ""): p for p in pools}
+    cache: dict[str, dict] = {}
+
+    for row in rows:
+        task_id = str(row.get("task_id", "") or "")
+        pool = pool_map.get(task_id)
+        if not task_id or not pool:
+            continue
+
+        if task_id not in cache:
+            cache[task_id] = client.fetch_task_view(task_id, force_refresh=force_refresh)
+        child_map = _task_view_child_map(cache[task_id])
+        started_action_map = _task_view_started_action_map(cache[task_id])
+        dept_subs = _get_followup_subtasks(pool, task_details, php_member_map)
+
+        delivery_rows = []
+        latest_delivery_at = ""
+
+        for dept_raw in REPORT_DEPTS_RAW:
+            subs = dept_subs.get(dept_raw, [])
+            finished_times: list[str] = []
+            for sub in subs:
+                child = child_map.get(str(sub.get("taskID", "") or ""))
+                if not child:
+                    continue
+                status = (child.get("status", "") or sub.get("status", "") or "")
+                finished_at = (child.get("finishedDate", "") or "")
+                if status in (STATUS_DONE - {"cancel"}) and _has_valid_dt(finished_at):
+                    finished_times.append(finished_at)
+
+            if not finished_times:
+                continue
+
+            dept_finished_at = max(finished_times)
+            delivery_rows.append({
+                "dept_raw": dept_raw,
+                "dept": to_display(dept_raw),
+                "finished_at": dept_finished_at,
+                "finished_display": _display_dt(dept_finished_at),
+            })
+            if not latest_delivery_at or dept_finished_at > latest_delivery_at:
+                latest_delivery_at = dept_finished_at
+
+        qa_candidates: list[tuple[str, str]] = []
+        for sub in dept_subs.get("测试部", []):
+            child = child_map.get(str(sub.get("taskID", "") or ""))
+            if not child:
+                continue
+            started_at, source = _pick_testing_started(child, started_action_map)
+            if started_at:
+                qa_candidates.append((started_at, source))
+
+        testing_started_at = ""
+        testing_started_source = ""
+        if qa_candidates:
+            testing_started_at, testing_started_source = min(qa_candidates, key=lambda item: item[0])
+
+        row["delivery_depts"] = delivery_rows
+        row["delivery_summary"] = "；".join(
+            f"{item['dept']} {item['finished_display']} 完成" for item in delivery_rows
+        )
+        row["latest_delivery_at"] = latest_delivery_at
+        row["latest_delivery_display"] = _display_dt(latest_delivery_at)
+        row["merge_status_summary"] = _merge_status_summary(row.get("env", "") or "")
+        row["testing_started_at"] = testing_started_at
+        row["testing_started_display"] = _display_dt(testing_started_at)
+        row["testing_started_source"] = testing_started_source
+        row["testing_handoff_summary"] = _testing_handoff_summary(testing_started_at, testing_started_source)
+
+    return rows
+
+
 # ─── 主函数：组装日报完整数据包 ───────────────────────────────────────────────
 
-def assemble_daily_report(client: ZentaoClient, project_id: str) -> dict:
+def assemble_daily_report(client: ZentaoClient, project_id: str, force_refresh: bool = False) -> dict:
     """
     组装日报所需的全部数据，返回给 Claude。
 
@@ -136,6 +323,8 @@ def assemble_daily_report(client: ZentaoClient, project_id: str) -> dict:
                 "other_due": [...],   # 其他临期
             },
             "test_focus":    [...],   # 测试关注
+            "testing_followups": [...], # 测试处理中（带卡住部门）
+            "merge_pending": [...],     # 待合并确认（带卡住部门）
             "online_bugs":   [...],   # 线上 Bug
             "rejected_list": [...],   # 驳回专栏
             "review_stat":   {unReview, pendingReview},  # 需求评审统计
@@ -159,7 +348,7 @@ def assemble_daily_report(client: ZentaoClient, project_id: str) -> dict:
 
     # ── 步骤1：取版本信息 ────────────────────────────────────────────────────
     log.info("  [1/4] 识别版本…")
-    versions = get_versions(client, project_id)
+    versions = get_versions(client, project_id, force_refresh=force_refresh)
     curr     = versions.get("curr")
     nxt      = versions.get("next")
 
@@ -180,8 +369,8 @@ def assemble_daily_report(client: ZentaoClient, project_id: str) -> dict:
 
     # ── 步骤2：取当前版本数据 ────────────────────────────────────────────────
     log.info("  [2/4] 拉取当前版本需求池（%s）…", curr["name"])
-    curr_req  = get_version_requirements(client, curr["id"], project_id)
-    curr_bugs = get_version_bugs(client, curr["id"], project_id)
+    curr_req  = get_version_requirements(client, curr["id"], project_id, force_refresh=force_refresh)
+    curr_bugs = get_version_bugs(client, curr["id"], project_id, force_refresh=force_refresh)
 
     curr_pools       = [p for p in curr_req["pools"] if p.get("task_status") != "cancel"]
     curr_pools_in_v  = [p for p in curr_pools if is_pool_in_version(p, curr["end"])]
@@ -201,6 +390,15 @@ def assemble_daily_report(client: ZentaoClient, project_id: str) -> dict:
         "delay_list":    calc_delay_list(curr_pools, curr_task_details, php_member_map, version_end, today),
         "not_test":      calc_not_test_list(curr_pools, curr_task_details, php_member_map, version_end, today),
         "test_focus":    calc_test_focus(curr_pools_in_v, bugs),
+        "testing_followups": _enrich_testing_followups(
+            client,
+            calc_testing_followups(curr_pools, curr_task_details, php_member_map, version_end),
+            curr_pools,
+            curr_task_details,
+            php_member_map,
+            force_refresh=force_refresh,
+        ),
+        "merge_pending": calc_merge_pending(curr_pools, curr_task_details, php_member_map, version_end),
         "online_bugs":   calc_online_bugs(bugs),
         "rejected_list": calc_rejected_list(curr_pools_in_v),
         "review_stat":   curr_req.get("review_stat", {}),
@@ -210,7 +408,7 @@ def assemble_daily_report(client: ZentaoClient, project_id: str) -> dict:
     next_data = None
     if nxt:
         log.info("  [4/4] 拉取下一版本需求池（%s）…", nxt["name"])
-        next_req    = get_version_requirements(client, nxt["id"], project_id)
+        next_req    = get_version_requirements(client, nxt["id"], project_id, force_refresh=force_refresh)
         next_pools  = [p for p in next_req["pools"] if p.get("task_status") != "cancel"]
         next_td     = next_req["task_details"]
         next_php_map = next_req["php_member_map"]
