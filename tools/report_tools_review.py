@@ -6,7 +6,7 @@ tools/report_tools_review.py  v4
 ABC 三分类：
   A类 — 确定性数据，直接写入
   B类 — Claude 生成实质草稿，标注【待确认】供审阅
-  C类 — 接口真正拿不到：延期 / 待办 / 复盘时间 / 内部Bug现象
+  C类 — 接口真正拿不到：延期 / 待办 / 复盘时间
 """
 
 import json
@@ -46,18 +46,7 @@ def _gen_bug_descriptions(all_bugs: list[dict]) -> dict[str, str]:
     # 规则推断（退回用）
     fallback: dict[str, str] = {}
     for b in all_bugs:
-        phenomenon = (b.get("phenomenon") or "").strip()
-        tracing = b.get("tracing", "") or ""
-        title   = b.get("title", "") or ""
-        if phenomenon:
-            fallback[b["id"]] = phenomenon[:30]
-        else:
-            m = re.search(r'现象[：:]([^\n]+)', tracing)
-            if m:
-                fallback[b["id"]] = m.group(1).strip()[:30]
-            else:
-                clean = re.sub(r'【[^】]+】', '', title).strip()
-                fallback[b["id"]] = clean[:25] if clean else title[:25]
+        fallback[b["id"]] = _resolve_bug_phenomenon(b)[:40]
 
     try:
         import anthropic as _anthropic
@@ -65,7 +54,7 @@ def _gen_bug_descriptions(all_bugs: list[dict]) -> dict[str, str]:
 
         items = []
         for b in all_bugs:
-            phenomenon = (b.get("phenomenon") or "").strip()[:100]
+            phenomenon = _resolve_bug_phenomenon(b)[:100]
             tracing   = (b.get("tracing", "") or "").strip()[:300]
             title     = b.get("title", "") or ""
             causes    = [
@@ -148,13 +137,16 @@ def _resolve_target_version(client, project_id: str, version: str, force_refresh
 #  文本处理工具
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _extract_phenomenon(phenomenon: str, tracing: str) -> str:
-    """优先使用结构化 phenomenon，缺失时再从 tracingBack 兼容提取。"""
-    phenomenon = (phenomenon or "").strip()
-    if phenomenon and phenomenon != _IFACE:
-        return phenomenon
+def _clean_bug_title(title: str) -> str:
+    title = re.sub(r"【[^】]*】", " ", title or "")
+    title = re.sub(r"\s+", " ", title).strip(" ，,")
+    return title
+
+
+def _extract_tracing_phenomenon(tracing: str) -> str:
+    tracing = (tracing or "").strip()
     if not tracing or tracing == _IFACE:
-        return _MANUAL
+        return ""
     m = re.search(r'现象[：:]([^\n]+)', tracing)
     if m:
         return m.group(1).strip()
@@ -162,7 +154,34 @@ def _extract_phenomenon(phenomenon: str, tracing: str) -> str:
         l.strip() for l in tracing.split('\n')
         if l.strip() and not l.strip().startswith('http') and len(l.strip()) > 5
     ]
-    return lines[0][:60] if lines else _MANUAL
+    return lines[0][:60] if lines else ""
+
+
+def _resolve_bug_phenomenon(bug: dict) -> str:
+    phenomenon = (bug.get("phenomenon") or "").strip()
+    if phenomenon and phenomenon != _IFACE:
+        return phenomenon
+
+    title = _clean_bug_title(bug.get("title", ""))
+    tracing_phenomenon = _extract_tracing_phenomenon(bug.get("tracing", ""))
+    generic_title = title.endswith(("页面问题", "数据有问题"))
+
+    if tracing_phenomenon and generic_title:
+        return tracing_phenomenon
+    if title:
+        return title
+    if tracing_phenomenon:
+        return tracing_phenomenon
+
+    cause = (bug.get("cause_analysis") or "").strip()
+    if cause and cause != _IFACE:
+        return cause[:60]
+
+    summary = _extract_tracing_summary(bug.get("tracing", ""))
+    if summary:
+        return summary[:60]
+
+    return _MANUAL
 
 
 def _extract_tracing_summary(tracing: str) -> str:
@@ -190,6 +209,20 @@ def _extract_tracing_summary(tracing: str) -> str:
     return text
 
 
+def _is_missing_demand_ref(value: str) -> bool:
+    value = (value or "").strip()
+    if not value or value == _IFACE:
+        return True
+    return any(flag in value for flag in ["无关联任务", "无关联需求", "无需求", "未有关联需求", "无单子"])
+
+
+def _is_missing_use_case_ref(value: str) -> bool:
+    value = (value or "").strip()
+    if not value or value == _IFACE:
+        return True
+    return any(flag in value for flag in ["无关联用例", "无用例", "无法溯源"])
+
+
 def _format_tracing_ref(label: str, value: str) -> str:
     """把需求/用例字段格式化成链接或纯文本标签。"""
     value = (value or "").strip()
@@ -202,18 +235,32 @@ def _format_tracing_ref(label: str, value: str) -> str:
 
 def _render_tracing_line(bug: dict) -> str:
     parts = []
-    demand_ref = _format_tracing_ref("关联需求", bug.get("demand", ""))
-    use_case_ref = _format_tracing_ref("关联用例", bug.get("use_case", ""))
-    if demand_ref:
-        parts.append(demand_ref)
-    if use_case_ref:
-        parts.append(use_case_ref)
+    demand = bug.get("demand", "")
+    use_case = bug.get("use_case", "")
+
+    if _is_missing_demand_ref(demand):
+        parts.append("需求无法溯源")
+    else:
+        demand_ref = _format_tracing_ref("关联需求", demand)
+        if demand_ref:
+            parts.append(demand_ref)
+
+    if _is_missing_use_case_ref(use_case):
+        parts.append("用例无法溯源")
+    else:
+        use_case_ref = _format_tracing_ref("关联用例", use_case)
+        if use_case_ref:
+            parts.append(use_case_ref)
 
     summary = _extract_tracing_summary(bug.get("tracing", ""))
+    if not summary:
+        cause = (bug.get("cause_analysis") or "").strip()
+        if cause and cause != _IFACE:
+            summary = cause
     if summary:
         parts.append(summary)
 
-    return " ".join(parts).strip()
+    return "；".join(parts).strip()
 
 
 def _severity_label(bug: dict, with_scope: bool = False) -> str:
@@ -231,35 +278,81 @@ def _severity_label(bug: dict, with_scope: bool = False) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _gen_1_6_mgmt_issues(ext: dict) -> list[dict]:
+    buckets: dict[tuple[str, str], dict] = {}
+
+    def infer_issue_and_todo(bug: dict) -> tuple[str, str]:
+        text = " ".join(
+            str(part or "")
+            for part in [
+                bug.get("title", ""),
+                bug.get("phenomenon", ""),
+                bug.get("cause_analysis", ""),
+                bug.get("tracing", ""),
+                bug.get("demand", ""),
+                bug.get("use_case", ""),
+            ]
+        )
+
+        demand_missing = _is_missing_demand_ref(bug.get("demand", ""))
+        use_case_missing = _is_missing_use_case_ref(bug.get("use_case", ""))
+
+        if any(k in text for k in ["统计", "报表", "人数", "活动统计", "对账", "金币"]):
+            return (
+                "统计口径和对账场景覆盖不足",
+                "涉及统计、报表、活动数据的需求，需明确口径和时间边界，并补齐对账校验点。",
+            )
+
+        if "处理需求时延伸的优化点" in text or (
+            demand_missing and use_case_missing and any(k in text for k in ["优化", "延伸", "告知到测试"])
+        ):
+            return (
+                "延伸优化改动未纳入正式需求和用例流程",
+                "延伸优化点必须先补需求和用例，再进入提测和上线。",
+            )
+
+        if any(k in text.lower() for k in ["chrome", "ios"]) or any(k in text for k in ["刷新", "顶部", "滚动"]):
+            return (
+                "兼容性和低复现场景验证不足",
+                "补充浏览器兼容专项回归，覆盖刷新、滚动恢复等低复现场景。",
+            )
+
+        if demand_missing and use_case_missing:
+            return (
+                "需求和用例链路缺失",
+                "先补齐需求和用例，再推进提测和上线。",
+            )
+
+        if use_case_missing:
+            return (
+                "需求已挂接，但测试覆盖链路不完整",
+                "补齐正式用例，并把关键校验点纳入回归。",
+            )
+
+        return (
+            "实现边界和异常场景校验不足",
+            "补齐边界场景自测和回归校验，避免同类问题再次进入线上。",
+        )
+
+    for bug in ext["deep_analysis"]:
+        issue, todo = infer_issue_and_todo(bug)
+        key = (issue, todo)
+        bucket = buckets.setdefault(key, {"issue": issue, "todo": todo, "bug_ids": set(), "depts": set()})
+        bucket["bug_ids"].add(bug["id"])
+        for dept in bug.get("depts", []):
+            name = dept.get("name", "")
+            if name:
+                bucket["depts"].add(name)
+
     rows = []
-    seen_bugs = set()
-    for b in ext["deep_analysis"]:
-        bid = b["id"]
-        if bid in seen_bugs:
-            continue
-        seen_bugs.add(bid)
-        for d in b["depts"]:
-            cause = d["cause"]
-            step  = d["step"]
-            dept  = d["name"]
-            if cause == _IFACE or not cause:
-                issue = f"原因待填写（{_CONFIRM}）"
-            elif any(k in cause for k in ["规范", "约束", "标准"]):
-                issue = "历史规范缺失，遗留问题未清理"
-            elif any(k in cause for k in ["需求", "产品", "历史"]):
-                issue = "需求描述不完整，历史需求缺少场景约束"
-            elif any(k in cause for k in ["认知", "用例", "测试"]):
-                issue = "测试覆盖遗漏，历史遗留场景未纳入"
-            elif any(k in cause for k in ["接口", "前后端", "格式", "null", "NULL", "数组"]):
-                issue = "前后端接口规范未约定"
-            else:
-                # 清理多行后截断
-                c_clean = re.sub(r'[\n\r]', ' ', cause).strip()
-                issue = c_clean[:20] + ("…" if len(c_clean) > 20 else "")
-            # 待办项清理多行
-            step_clean = re.sub(r'[\n\r]', ' ', step).strip() if step != _IFACE else _MANUAL
-            todo = step_clean[:25] + ("…" if len(step_clean) > 25 else step_clean) if step_clean != _MANUAL else _MANUAL
-            rows.append({"issue": issue, "bug_ids": bid, "depts": dept, "todo": todo})
+    for item in buckets.values():
+        rows.append({
+            "issue": item["issue"],
+            "bug_ids": "、".join(sorted(item["bug_ids"])),
+            "depts": "、".join(sorted(item["depts"])) or _MANUAL,
+            "todo": item["todo"],
+        })
+
+    rows.sort(key=lambda row: (len(row["bug_ids"]), row["issue"]), reverse=True)
     return rows or [{"issue": _MANUAL, "bug_ids": _MANUAL, "depts": _MANUAL, "todo": _MANUAL}]
 
 
@@ -409,10 +502,7 @@ def _generate_markdown(
     W("| --- | --- | --- | --- | --- |")
     for i, b in enumerate(ext["review_list"], 1):
         da = next((d for d in ext["deep_analysis"] if d["id"] == b["id"]), None)
-        phenomenon = _extract_phenomenon(
-            da.get("phenomenon", "") if da else "",
-            da.get("tracing", "") if da else "",
-        )
+        phenomenon = _resolve_bug_phenomenon(da or {})
         W(f"| {i}   | {b['link']} | {b['severity_label']} | {phenomenon} | {b['dept_str']} |")
     NL()
     dis_bugs  = [b for b in ext["review_list"] if b["is_dispute"]]
@@ -484,7 +574,7 @@ def _generate_markdown(
             W(f"# {desc}")
             NL()
         W(f"**Bug标题：** {b['link']}")
-        phenomenon = _extract_phenomenon(b.get("phenomenon", ""), b.get("tracing", ""))
+        phenomenon = _resolve_bug_phenomenon(b)
         W(f"**Bug现象：** {phenomenon}")
         W(f"**缺陷等级：** {b['severity_label']}")
         tracing_line = _render_tracing_line(b)
@@ -631,7 +721,7 @@ def _generate_markdown(
             W(f"# {desc}")
             NL()
         W(f"**Bug标题：** {b['link']}")
-        W(f"**Bug现象：** {_MANUAL}")  # 内部Bug无tracingBack，C类
+        W(f"**Bug现象：** {_resolve_bug_phenomenon(b)}")
         W(f"**缺陷等级：** {b['severity_label']}")
         NL()
         for d in b["depts"]:
@@ -657,19 +747,20 @@ def _generate_markdown(
     if low_quality:
         for lq in low_quality:
             high_str = str(lq["high_extreme_count"]) if lq["high_extreme_count"] else "—"
-            if lq["bug_count"] >= 20:
-                judgment = f"{lq['judgment_prefix']}；本版本Bug数量最高，需重点关注提测质量"
+            if lq["high_extreme_count"]:
+                judgment = "Bug集中且含高缺陷，需重点复盘"
+            elif lq["bug_count"] >= 20:
+                judgment = "Bug集中，需重点复盘"
             else:
-                judgment = f"{lq['judgment_prefix']}；Bug较集中，建议提测前加强自测"
+                judgment = "Bug集中，需关注提测质量"
             W(f"| {lq['link']} | {lq['bug_count']}   | {high_str}    | {lq['main_dept']} | {judgment} |")
     else:
         W(f"| — | — | — | — | 本版本无Bug≥5的任务 |")
     NL()
     if low_quality:
         top = low_quality[0]
-        high_note = f"，其中{top['high_extreme_count']}条为高等/极严重缺陷" if top["high_extreme_count"] else ""
-        W(f"**结论：** 本版本Bug集中度最高的任务为{top['link']}，共{top['bug_count']}条Bug{high_note}。"
-          f"建议复盘该任务的提测流程，加强功能自测和用例覆盖。")
+        high_note = f"，且含{top['high_extreme_count']}条高等/极严重缺陷" if top["high_extreme_count"] else ""
+        W(f"**结论：** {top['link']} Bug最集中，共{top['bug_count']}条{high_note}，建议优先复盘。")
     else:
         W(f"**结论：** 本版本各任务Bug数量均在合理范围内，无明显低质量任务。")
     NL()
@@ -710,9 +801,9 @@ def _generate_markdown(
         ext_trend = "有所降低" if req_curr_ext < prev_ext_reqs else "有所增加" if req_curr_ext > prev_ext_reqs else "基本持平"
         int_trend = "有所降低" if req_curr_int < prev_int_reqs else "有所增加" if req_curr_int > prev_int_reqs else "基本持平"
         W(f"**版本概况：** 本版本外部需求{req_curr_ext}项、内部需求{req_curr_int}项，"
-          f"较上版本外部需求{ext_trend}、内部需求{int_trend}。{_MANUAL}")
+          f"较上版本外部需求{ext_trend}、内部需求{int_trend}。")
     else:
-        W(f"**版本概况：** 本版本外部需求{req_curr_ext}项、内部需求{req_curr_int}项。{_MANUAL}")
+        W(f"**版本概况：** 本版本外部需求{req_curr_ext}项、内部需求{req_curr_int}项。")
     NL()
     W("---")
     NL()
@@ -833,11 +924,10 @@ def assemble_review_report(
             "high_extreme": int_["extreme_count"] + int_["high_count"],
         },
         "manual_required": [
-            "各条内部Bug现象描述（深度分析 Bug现象字段）",
             "3.2 过程延期部门分布和总数",
             "3.3 延期任务记录（5行）",
             "3.4 上周复盘待办项（5行）",
-            "复盘时间、版本概况补充说明",
+            "复盘时间",
         ],
         "hint": (
             f"⚠️ {iface_cnt}处标注【待补充·接口】，说明各部门尚未在禅道填写原因/举措，"

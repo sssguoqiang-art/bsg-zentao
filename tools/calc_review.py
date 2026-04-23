@@ -347,6 +347,13 @@ def calc_int_bugs(bugs: list[dict], dept_review: dict) -> dict:
             "severity_label": _severity_label(b),
             "is_typical":     bool(b.get("is_typical")),
             "is_dispute":     is_dis,
+            "phenomenon":     (b.get("phenomenon") or "").strip(),
+            "scope_influence": (b.get("scope_influence") or "").strip(),
+            "demand":         (b.get("demand") or "").strip(),
+            "use_case":       (b.get("use_case") or "").strip(),
+            "dispute_remark": (b.get("dispute_remark") or "").strip(),
+            "cause_analysis": (b.get("cause_analysis") or "").strip(),
+            "tracing":        (b.get("tracing_back") or "").strip() or _IFACE,
             "depts":          depts,
         })
 
